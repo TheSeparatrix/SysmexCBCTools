@@ -23,6 +23,8 @@ keywords:
   - gam-correction
   - flow-cytometry
   - machine-learning
+  - blood-counts
+  - full-blood-count
 license: Apache-2.0
 version: 0.1.0
-date-released: 2025-12-23
+date-released: 2025-12-24
