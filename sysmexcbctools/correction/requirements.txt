@@ -1,0 +1,12 @@
+# Core dependencies
+numpy>=1.19.0
+pandas>=1.1.0
+scipy>=1.5.0  # Note: pygam compatibility handled via monkey-patch in code
+pygam>=0.8.0
+joblib>=0.16.0
+tqdm>=4.50.0
+
+# Optional dependencies for development and visualization
+matplotlib>=3.3.0
+seaborn>=0.11.0
+jupyter>=1.0.0

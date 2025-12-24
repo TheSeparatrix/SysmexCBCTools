@@ -1,0 +1,30 @@
+# Core dependencies for Sysmex Raw Alignment
+numpy
+pandas
+scipy
+scikit-learn
+matplotlib
+joblib
+tqdm
+PyYAML
+
+# Optimal transport for GMM-OT algorithm
+POT
+
+# Flow cytometry file handling  
+flowio
+
+# GAM-based methods (optional, in othermethods_notyetimplemented/)
+pygam
+
+# ML dependencies for optional components
+torch
+seaborn
+
+# Jupyter/interactive dependencies for optional components  
+ipywidgets
+jupyter
+
+# Specialized dependencies for optional components
+# cryptpandas  # Uncomment if needed for encrypted data
+# dvc  # Uncomment if using DVC for data version control

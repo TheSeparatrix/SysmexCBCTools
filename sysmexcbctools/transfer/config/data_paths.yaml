@@ -1,0 +1,38 @@
+# Data paths configuration
+# Maps logical dataset names to actual file system paths
+
+# Base paths for different data storage locations
+base_paths:
+  rds_project: "/rds/project/rds-ccRCdkyWMsY/ref"
+
+# Dataset paths - organised by category
+datasets:
+  # Processed data
+  processed:
+    interval_36: "${base_paths.rds_project}/INTERVAL/HAAS_processed/XN-10^11036_processed"
+    interval_41: "${base_paths.rds_project}/INTERVAL/HAAS_processed/XN-10^11041_processed"
+    strides: "${base_paths.rds_project}/STRIDES/FBC_data/processed_decrypted"
+  
+  # Raw data
+  raw:
+    interval_36: "${base_paths.rds_project}/INTERVAL/HAAS_processed/XN-10^11036"
+    interval_41: "${base_paths.rds_project}/INTERVAL/HAAS_processed/XN-10^11041"
+    strides: "${base_paths.rds_project}/STRIDES/FBC_data/decrypted/STRIDES_SimonDecrypted/STRIDES"
+    strides_merged: "${base_paths.rds_project}/STRIDES/FBC_data/decrypted/STRIDES_SimonDecrypted/STRIDES_merged"
+
+# Specific file paths
+files:
+  centile_samples:
+    strides: "${base_paths.rds_project}/STRIDES/FBC_data/strides_centile_samples.npy"
+    interval_baseline: "${base_paths.rds_project}/INTERVAL/interval_baseline_centile_samples.npy"
+    interval_baseline_36: "${base_paths.rds_project}/INTERVAL/interval_baseline_centile_samples_36.npy"
+    interval_baseline_41: "${base_paths.rds_project}/INTERVAL/interval_baseline_centile_samples_41.npy"
+
+# Alternative configuration for different environments
+environments:
+  production:
+    base_rds_path: "/rds/project/rds-ccRCdkyWMsY/ref"
+  development:
+    base_rds_path: "/path/to/dev/data"  # not currently used
+  local:
+    base_rds_path: "/path/to/local/data"  # not currently used

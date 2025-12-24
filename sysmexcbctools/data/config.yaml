@@ -1,0 +1,31 @@
+output:
+  directory: "./output"
+  filename_prefix: "XN_SAMPLE_processed"
+
+input:
+  datasets: # here you can define your own (multiple) datasets if you want to process only a subset of your data
+    - name: "INTERVAL"
+      files:
+        - "data/XN_SAMPLE.csv"
+    - name: "STRIDES"
+      files:
+        - "path/to/XN_SAMPLE.csv"
+        - "second/path/to/XN_SAMPLE.csv"
+
+  # Specify a specific dataset to process (optional)
+  use_dataset: "INTERVAL"  # If empty or missing, all datasets will be processed
+
+processing:
+  remove_clotintube: true # removes samples based on flags "IP SUS(RBC)Turbidity/HGB Interf?", "IP SUS(RBC)RBC Agglutination?", "IP SUS(PLT)PLT Clumps?"
+  remove_multimeasurementsamples: true # removes multiple measurements per sample based on how close first and second are on core FBC parameters (using std_threshold below)
+  remove_correlated: false # remove columns which are highly correlated with core FBC parameters (NOT RECOMMENDED!)
+  std_threshold: 1.0  # Threshold for comparing multiple measurements
+  keep_drop_rows: false # If true, no rows will be dropped. Instead, the reason for dropping is added as a new column, prefixed with 'drop'.
+  make_dummy_marks: false # If true, each measurement with a data mark field (ending in "/M") will have that field one-hot encoded into multiple columns in the final output
+  
+  # Memory optimization settings
+  use_memory_optimized: true # Use memory-optimized processing for large datasets (recommended for >100k rows)
+  enable_memory_monitoring: true # Log memory usage throughout processing
+  correlation_sample_size: 50000 # Maximum rows to use for correlation analysis (reduces memory usage)
+  chunk_size: 1000 # Number of sample IDs to process at once in chunked operations
+  force_dask: false # Force use of Dask for multiple measurements processing (for testing, not recommended for production)

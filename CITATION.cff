@@ -1,0 +1,28 @@
+cff-version: 1.2.0
+title: SysmexCBCTools
+message: "If you use this software, please cite it as below."
+type: software
+authors:
+  - family-names: Kreuter
+    given-names: Daniel
+    orcid: https://orcid.org/0000-0002-5454-2492
+repository-code: https://github.com/TheSeparatrix/SysmexCBCTools
+url: https://github.com/TheSeparatrix/SysmexCBCTools
+abstract: >
+  A unified Python toolkit for processing and analysing Sysmex haematology
+  analyser data. Includes modules for data cleaning (XN_SAMPLE.csv processing),
+  GMM-OT-based flow cytometry alignment between analysers, GAM-based covariate
+  correction, and multi-domain shift mitigation through domain-invariant
+  representation learning (Dis-AE 2).
+keywords:
+  - sysmex
+  - haematology
+  - complete-blood-count
+  - optimal-transport
+  - domain-adaptation
+  - gam-correction
+  - flow-cytometry
+  - machine-learning
+license: Apache-2.0
+version: 0.1.0
+date-released: 2025-12-23

@@ -1,0 +1,21 @@
+name: sysmex-alignment
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.8
+  - numpy
+  - pandas
+  - scipy
+  - scikit-learn
+  - matplotlib
+  - joblib
+  - tqdm
+  - pyyaml
+  - seaborn
+  - jupyter
+  - ipywidgets
+  - pip
+  - pip:
+    - POT
+    - flowio
+    - pygam
