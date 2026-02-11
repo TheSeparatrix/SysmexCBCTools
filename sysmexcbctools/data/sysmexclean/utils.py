@@ -2,6 +2,7 @@ import gc
 import logging
 import os
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -60,16 +61,87 @@ def load_config(config_path):
         return yaml.safe_load(file)
 
 
+_SUPPORTED_EXTENSIONS = {".csv", ".parquet", ".pq"}
+
+
+def _read_single_file(path, logger):
+    """
+    Read a single data file, dispatching on file extension.
+
+    Parameters
+    ----------
+    path : str or Path
+        Path to a ``.csv``, ``.parquet``, or ``.pq`` file.
+    logger : logging.Logger
+        Logger for status messages.
+
+    Returns
+    -------
+    df : pd.DataFrame
+
+    Raises
+    ------
+    ValueError
+        If the file extension is not supported.
+    ImportError
+        If pyarrow is not installed and a parquet file is requested.
+    """
+    suffix = Path(path).suffix.lower()
+
+    if suffix == ".csv":
+        return pd.read_csv(path, encoding="ISO-8859-1", low_memory=False)
+
+    if suffix in {".parquet", ".pq"}:
+        try:
+            return pd.read_parquet(path)
+        except ImportError:
+            raise ImportError(
+                "Reading parquet files requires pyarrow. "
+                "Install it with: pip install pyarrow"
+            )
+
+    raise ValueError(
+        f"Unsupported file extension '{suffix}' for {path}. "
+        f"Supported formats: {sorted(_SUPPORTED_EXTENSIONS)}"
+    )
+
+
 def load_dataframes(file_paths, logger):
-    """Load and concatenate dataframes from multiple CSV files."""
-    logger.info(f"Loading {len(file_paths)} CSV files")
+    """
+    Load and concatenate dataframes from multiple data files.
+
+    Supports ``.csv``, ``.parquet``, and ``.pq`` files (may be mixed).
+
+    Parameters
+    ----------
+    file_paths : list of str
+        Paths to data files.
+    logger : logging.Logger
+        Logger for status messages.
+
+    Returns
+    -------
+    df : pd.DataFrame
+        Concatenated dataframe from all files.
+
+    Raises
+    ------
+    ValueError
+        If no valid dataframes could be loaded, or if a file has an
+        unsupported extension.
+    ImportError
+        If pyarrow is not installed and a parquet file is requested.
+    """
+    logger.info(f"Loading {len(file_paths)} file(s)")
 
     dfs = []
     for file in tqdm(file_paths):
         try:
-            df = pd.read_csv(file, encoding="ISO-8859-1", low_memory=False)
+            df = _read_single_file(file, logger)
             dfs.append(df)
             logger.info(f"Successfully loaded {file} with {df.shape[0]} rows")
+        except (ImportError, ValueError):
+            raise
         except Exception as e:
             logger.error(f"Error loading {file}: {e}")
 

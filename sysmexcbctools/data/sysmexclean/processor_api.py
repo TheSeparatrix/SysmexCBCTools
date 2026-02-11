@@ -6,10 +6,11 @@ Sysmex XN_SAMPLE.csv files, making it easy to use in Jupyter notebooks and
 Python scripts.
 """
 
+from __future__ import annotations
+
 import logging
 import os
 from datetime import datetime
-from typing import List, Optional, Union
 
 import pandas as pd
 
@@ -136,7 +137,7 @@ class XNSampleProcessor:
 
     def __init__(
         self,
-        config_path: Optional[str] = None,
+        config_path: str | None = None,
         remove_clotintube: bool = True,
         remove_multimeasurementsamples: bool = True,
         remove_correlated: bool = False,
@@ -262,17 +263,20 @@ class XNSampleProcessor:
 
     def process_files(
         self,
-        input_files: Union[str, List[str]],
+        input_files: pd.DataFrame | str | list[str],
         dataset_name: str = "dataset",
         save_output: bool = False,
     ) -> pd.DataFrame:
         """
-        Process XN_SAMPLE CSV files.
+        Process XN_SAMPLE data from files or a pre-loaded DataFrame.
 
         Parameters
         ----------
-        input_files : str or list of str
-            Path(s) to XN_SAMPLE.csv file(s) to process.
+        input_files : pd.DataFrame or str or list of str
+            Data to process. Accepts:
+            - A ``pd.DataFrame`` (bypasses file loading entirely).
+            - A path to a ``.csv``, ``.parquet``, or ``.pq`` file.
+            - A list of file paths (may mix formats).
         dataset_name : str, default="dataset"
             Name for this dataset (used in output filenames).
         save_output : bool, default=False
@@ -285,22 +289,38 @@ class XNSampleProcessor:
 
         Examples
         --------
+        Process a single CSV file:
+
         >>> processor = XNSampleProcessor()
         >>> df = processor.process_files("data/XN_SAMPLE.csv")
+
+        Process a parquet file:
+
+        >>> df = processor.process_files("data/XN_SAMPLE.parquet")
+
+        Process a pre-loaded DataFrame:
+
+        >>> import pandas as pd
+        >>> raw = pd.read_csv("data/XN_SAMPLE.csv")
+        >>> df = processor.process_files(raw)
+
+        Combine multiple files:
+
         >>> df = processor.process_files(
-        ...     ["file1.csv", "file2.csv"],
+        ...     ["file1.csv", "file2.parquet"],
         ...     dataset_name="combined",
-        ...     save_output=True
+        ...     save_output=True,
         ... )
         """
-        # Convert single file to list
-        if isinstance(input_files, str):
-            input_files = [input_files]
-
         self.logger.info(f"Processing dataset: {dataset_name}")
 
-        # Load dataframes
-        df = load_dataframes(input_files, self.logger)
+        # Dispatch: DataFrame, single path, or list of paths
+        if isinstance(input_files, pd.DataFrame):
+            df = input_files
+        else:
+            if isinstance(input_files, str):
+                input_files = [input_files]
+            df = load_dataframes(input_files, self.logger)
         if self.enable_memory_monitoring:
             log_memory_usage(self.logger, f"After loading {dataset_name} dataset")
 
@@ -470,7 +490,7 @@ class XNSampleProcessor:
 
         return df
 
-    def get_last_processed(self) -> Optional[pd.DataFrame]:
+    def get_last_processed(self) -> pd.DataFrame | None:
         """
         Get the most recently processed dataframe.
 
