@@ -266,6 +266,9 @@ class XNSampleProcessor:
         input_files: pd.DataFrame | str | list[str],
         dataset_name: str = "dataset",
         save_output: bool = False,
+        *,
+        copy_output_data: bool = False,
+        copy_sct: bool = False,
     ) -> pd.DataFrame:
         """
         Process XN_SAMPLE data from files or a pre-loaded DataFrame.
@@ -281,11 +284,28 @@ class XNSampleProcessor:
             Name for this dataset (used in output filenames).
         save_output : bool, default=False
             Whether to save the processed dataframe to disk.
+        copy_output_data : bool, default=False
+            If True, filter and copy OutputData.csv from each source
+            directory into the output directory, keeping only rows that
+            match surviving samples.  Requires *input_files* to be file
+            paths (not a DataFrame) and *save_output* to be True.
+        copy_sct : bool, default=False
+            If True, copy matching SCT files from each source directory
+            into ``output_dir/SCT/``, consolidating overflow files.
+            Requires *input_files* to be file paths (not a DataFrame) and
+            *save_output* to be True.
 
         Returns
         -------
         df_processed : pd.DataFrame
             The processed and cleaned dataframe.
+
+        Raises
+        ------
+        ValueError
+            If *copy_output_data* or *copy_sct* is True but *input_files*
+            is a DataFrame (source directories cannot be derived), or if
+            *save_output* is False (no output directory to write to).
 
         Examples
         --------
@@ -304,23 +324,38 @@ class XNSampleProcessor:
         >>> raw = pd.read_csv("data/XN_SAMPLE.csv")
         >>> df = processor.process_files(raw)
 
-        Combine multiple files:
+        Process and copy ancillary files:
 
         >>> df = processor.process_files(
-        ...     ["file1.csv", "file2.parquet"],
+        ...     ["file1.csv", "file2.csv"],
         ...     dataset_name="combined",
         ...     save_output=True,
+        ...     copy_output_data=True,
+        ...     copy_sct=True,
         ... )
         """
+        # Validate ancillary copy options
+        if (copy_output_data or copy_sct) and isinstance(input_files, pd.DataFrame):
+            raise ValueError(
+                "copy_output_data and copy_sct require file paths as input_files, "
+                "not a DataFrame (source directories cannot be derived)."
+            )
+        if (copy_output_data or copy_sct) and not save_output:
+            raise ValueError(
+                "copy_output_data and copy_sct require save_output=True."
+            )
+
         self.logger.info(f"Processing dataset: {dataset_name}")
 
         # Dispatch: DataFrame, single path, or list of paths
         if isinstance(input_files, pd.DataFrame):
             df = input_files
+            input_file_paths: list[str] | None = None
         else:
             if isinstance(input_files, str):
                 input_files = [input_files]
-            df = load_dataframes(input_files, self.logger)
+            input_file_paths = list(input_files)
+            df = load_dataframes(input_file_paths, self.logger)
         if self.enable_memory_monitoring:
             log_memory_usage(self.logger, f"After loading {dataset_name} dataset")
 
@@ -334,6 +369,39 @@ class XNSampleProcessor:
             filename = f"{self.output_prefix}_{dataset_name}_{dt_string}.csv"
             output_path = os.path.join(self.output_dir, filename)
             save_results(df, output_path, self.logger)
+
+        # Copy ancillary files if requested
+        if copy_output_data or copy_sct:
+            from .ancillary import (
+                build_matching_keys,
+                copy_matching_sct_files,
+                derive_source_dirs,
+                filter_output_data,
+            )
+
+            keys = build_matching_keys(df)
+            source_dirs = derive_source_dirs(input_file_paths)
+
+            if copy_output_data:
+                output_data_df = filter_output_data(
+                    source_dirs, keys, self.logger
+                )
+                od_filename = f"OutputData_{dataset_name}_{dt_string}.csv"
+                od_path = os.path.join(self.output_dir, od_filename)
+                output_data_df.to_csv(od_path, index=False)
+                self.diagnostic_files_["output_data"] = od_path
+                self.logger.info(f"Saved filtered OutputData to {od_path}")
+
+            if copy_sct:
+                sct_dir = os.path.join(self.output_dir, "SCT")
+                os.makedirs(sct_dir, exist_ok=True)
+                n_copied = copy_matching_sct_files(
+                    source_dirs, keys, sct_dir, self.logger
+                )
+                self.diagnostic_files_["sct_dir"] = sct_dir
+                self.logger.info(
+                    f"Copied {n_copied} SCT files to {sct_dir}"
+                )
 
         # Store for later access
         self.last_processed_ = df

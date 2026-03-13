@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -15,6 +16,28 @@ def minimal_df():
         "Sample No.": ["S001", "S002", "S003"],
         "WBC": [5.0, 6.1, 7.2],
         "RBC": [4.5, 4.8, 5.0],
+    })
+
+
+@pytest.fixture
+def ancillary_fixture_dir():
+    """Path to the ancillary fixture directory."""
+    return Path(__file__).resolve().parent / "fixtures" / "ancillary"
+
+
+@pytest.fixture
+def processed_df():
+    """Post-pipeline DataFrame for the ancillary fixture samples.
+
+    QC-32941101 has two raw measurements; only the earliest survives.
+    """
+    return pd.DataFrame({
+        "Sample No.": [
+            "QC-32941101", "QC-43211103", "QC-41531101", "QC-43211102",
+        ],
+        "Date": ["2013/12/27", "2015/02/03", "2014/08/22", "2014/12/16"],
+        "Time": ["09:52:04", "09:10:38", "09:08:26", "10:02:34"],
+        "WBC(10^3/uL)": [2.92, 15.69, 6.45, 8.12],
     })
 
 

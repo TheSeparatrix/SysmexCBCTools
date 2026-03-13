@@ -78,3 +78,41 @@ class TestProcessFilesDispatch:
             processor.process_files(minimal_df)
 
         pd.testing.assert_frame_equal(processor.last_processed_, minimal_df)
+
+
+class TestAncillaryCopyValidation:
+    """Validation for copy_output_data and copy_sct parameters."""
+
+    def test_copy_output_data_with_dataframe_raises(self, processor, minimal_df):
+        with pytest.raises(ValueError, match="not a DataFrame"):
+            processor.process_files(
+                minimal_df, copy_output_data=True, save_output=True
+            )
+
+    def test_copy_sct_with_dataframe_raises(self, processor, minimal_df):
+        with pytest.raises(ValueError, match="not a DataFrame"):
+            processor.process_files(
+                minimal_df, copy_sct=True, save_output=True
+            )
+
+    def test_copy_output_data_without_save_raises(self, processor, csv_file):
+        with pytest.raises(ValueError, match="save_output=True"):
+            processor.process_files(
+                str(csv_file), copy_output_data=True, save_output=False
+            )
+
+    def test_copy_sct_without_save_raises(self, processor, csv_file):
+        with pytest.raises(ValueError, match="save_output=True"):
+            processor.process_files(
+                str(csv_file), copy_sct=True, save_output=False
+            )
+
+    def test_ancillary_flags_default_false(self, processor, minimal_df):
+        """By default, no ancillary files should be created."""
+        with mock.patch.object(
+            processor, "_process_pipeline", return_value=minimal_df
+        ):
+            processor.process_files(minimal_df, save_output=False)
+
+        assert "output_data" not in processor.diagnostic_files_
+        assert "sct_dir" not in processor.diagnostic_files_
