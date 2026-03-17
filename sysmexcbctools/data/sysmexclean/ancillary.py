@@ -171,9 +171,16 @@ def _read_and_merge_sct(
 def filter_output_data(
     source_dirs: list[Path],
     matching_keys: set[tuple[str, str]],
+    output_path: str | Path,
     logger: logging.Logger,
-) -> pd.DataFrame:
-    """Load and filter OutputData.csv files to matching samples.
+    *,
+    columns: list[str] | None = None,
+) -> int:
+    """Load, filter, and incrementally write OutputData.csv rows to disk.
+
+    Processes one source directory at a time and appends matching rows to
+    *output_path*, keeping peak memory low.  Rows that share a composite
+    key with a row already written are silently skipped (deduplication).
 
     Parameters
     ----------
@@ -181,15 +188,28 @@ def filter_output_data(
         Directories that may contain an ``OutputData.csv``.
     matching_keys : set of (str, str)
         Composite keys ``(sample_no, YYYYMMDD_HHMMSS)`` of surviving samples.
+    output_path : str or Path
+        Destination CSV file.  Created (or overwritten) on first write,
+        then appended to.
     logger : logging.Logger
         Logger for warnings.
+    columns : list of str, optional
+        If given, only these columns are written to *output_path*.  The
+        key columns (``Sample No.``, ``AnalyzeDate``, ``AnalyzeTime``)
+        are always read from disk for matching but may be excluded from
+        the output if not listed here.
 
     Returns
     -------
-    filtered : pd.DataFrame
-        Concatenated, filtered rows from all source directories.
+    n_written : int
+        Total number of rows written.
     """
-    frames: list[pd.DataFrame] = []
+    output_path = Path(output_path)
+    seen_keys: set[tuple[str, str]] = set()
+    total_written = 0
+    header_written = False
+
+    _KEY_COLS = {"Sample No.", "AnalyzeDate", "AnalyzeTime"}
 
     for d in source_dirs:
         od_path = d / "OutputData.csv"
@@ -197,9 +217,23 @@ def filter_output_data(
             logger.warning("OutputData.csv not found in %s -- skipping", d)
             continue
 
-        od = pd.read_csv(od_path, low_memory=False)
+        # Determine which columns to load from disk
+        if columns is not None:
+            available = set(pd.read_csv(od_path, nrows=0).columns)
+            load_cols = list((_KEY_COLS | set(columns)) & available)
+            missing = set(columns) - available
+            if missing:
+                logger.warning(
+                    "OutputData.csv in %s missing requested columns: %s",
+                    d, ", ".join(sorted(missing)),
+                )
+        else:
+            load_cols = None
 
-        keep_mask = pd.Series(False, index=od.index)
+        od = pd.read_csv(od_path, usecols=load_cols, low_memory=False)
+
+        # Filter rows: must match a surviving sample and not already written
+        keep_indices: list[int] = []
         for idx, row in od.iterrows():
             try:
                 dt = datetime.strptime(
@@ -210,19 +244,42 @@ def filter_output_data(
                 continue
             dt_str = dt.strftime("%Y%m%d_%H%M%S")
             sample_no = str(row["Sample No."]).strip()
-            if (sample_no, dt_str) in matching_keys:
-                keep_mask.at[idx] = True
+            key = (sample_no, dt_str)
+            if key in matching_keys and key not in seen_keys:
+                keep_indices.append(idx)
+                seen_keys.add(key)
 
-        filtered = od.loc[keep_mask]
+        filtered = od.loc[keep_indices]
+
+        # Select only requested output columns
+        if columns is not None:
+            out_cols = [c for c in columns if c in filtered.columns]
+            filtered = filtered[out_cols]
+
         logger.info(
             "OutputData.csv in %s: kept %d / %d rows",
             d, len(filtered), len(od),
         )
-        frames.append(filtered)
 
-    if not frames:
-        return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True)
+        if not filtered.empty:
+            filtered.to_csv(
+                output_path,
+                mode="a" if header_written else "w",
+                header=not header_written,
+                index=False,
+            )
+            header_written = True
+            total_written += len(filtered)
+
+        # Free memory before loading next file
+        del od, filtered
+
+    if not header_written and columns is not None:
+        # Write an empty file with the requested column header so
+        # downstream code always finds a valid CSV.
+        pd.DataFrame(columns=columns).to_csv(output_path, index=False)
+
+    return total_written
 
 
 # ---------------------------------------------------------------------------
@@ -276,10 +333,18 @@ def copy_matching_sct_files(
             if (sample_no, dt_str) not in matching_keys:
                 continue
 
+            # Skip duplicates across source directories
+            dest = out_dir / entry.name
+            if dest.exists():
+                logger.debug(
+                    "SCT file %s already written -- skipping duplicate",
+                    entry.name,
+                )
+                continue
+
             base_path = Path(entry.path)
             overflow_paths = _find_overflow_files(base_path)
             merged = _read_and_merge_sct(base_path, overflow_paths)
-            dest = out_dir / entry.name
             merged.to_csv(dest, index=False)
             n_written += 1
 

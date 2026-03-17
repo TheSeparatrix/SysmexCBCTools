@@ -269,6 +269,7 @@ class XNSampleProcessor:
         *,
         copy_output_data: bool = False,
         copy_sct: bool = False,
+        output_data_columns: list[str] | None = None,
     ) -> pd.DataFrame:
         """
         Process XN_SAMPLE data from files or a pre-loaded DataFrame.
@@ -294,6 +295,12 @@ class XNSampleProcessor:
             into ``output_dir/SCT/``, consolidating overflow files.
             Requires *input_files* to be file paths (not a DataFrame) and
             *save_output* to be True.
+        output_data_columns : list of str, optional
+            If given, only these columns are written to the filtered
+            OutputData CSV.  Useful for reducing file size when only
+            metadata and a few measurement columns are needed (e.g.
+            ``["Sample No.", "AnalyzeDate", "AnalyzeTime", "RBC", "PLT"]``).
+            Ignored when *copy_output_data* is False.
 
         Returns
         -------
@@ -383,14 +390,16 @@ class XNSampleProcessor:
             source_dirs = derive_source_dirs(input_file_paths)
 
             if copy_output_data:
-                output_data_df = filter_output_data(
-                    source_dirs, keys, self.logger
-                )
                 od_filename = f"OutputData_{dataset_name}_{dt_string}.csv"
                 od_path = os.path.join(self.output_dir, od_filename)
-                output_data_df.to_csv(od_path, index=False)
+                n_od_rows = filter_output_data(
+                    source_dirs, keys, od_path, self.logger,
+                    columns=output_data_columns,
+                )
                 self.diagnostic_files_["output_data"] = od_path
-                self.logger.info(f"Saved filtered OutputData to {od_path}")
+                self.logger.info(
+                    f"Saved {n_od_rows} filtered OutputData rows to {od_path}"
+                )
 
             if copy_sct:
                 sct_dir = os.path.join(self.output_dir, "SCT")

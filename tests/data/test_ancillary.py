@@ -199,29 +199,61 @@ class TestReadAndMergeSct:
 
 class TestFilterOutputData:
 
-    def test_correct_row_filtering(self, ancillary_fixture_dir, processed_df, logger):
+    def test_correct_row_filtering(self, ancillary_fixture_dir, processed_df, tmp_path, logger):
         keys = build_matching_keys(processed_df)
-        source_dirs = [ancillary_fixture_dir]
-        result = filter_output_data(source_dirs, keys, logger)
-        assert len(result) == 4
+        out = tmp_path / "OutputData_filtered.csv"
+        n = filter_output_data([ancillary_fixture_dir], keys, out, logger)
+        assert n == 4
+        result = pd.read_csv(out)
         assert set(result["Sample No."]) == {
             "QC-32941101", "QC-43211103", "QC-41531101", "QC-43211102",
         }
 
-    def test_excludes_non_matching(self, ancillary_fixture_dir, logger):
+    def test_excludes_non_matching(self, ancillary_fixture_dir, tmp_path, logger):
         """Only the 20131227 measurement of QC-32941101 should match."""
         keys = {("QC-32941101", "20131227_095204")}
-        result = filter_output_data([ancillary_fixture_dir], keys, logger)
-        assert len(result) == 1
+        out = tmp_path / "od.csv"
+        n = filter_output_data([ancillary_fixture_dir], keys, out, logger)
+        assert n == 1
 
     def test_missing_file_warns(self, tmp_path, logger):
         keys = {("S001", "20200101_120000")}
-        result = filter_output_data([tmp_path], keys, logger)
-        assert result.empty
+        out = tmp_path / "od.csv"
+        n = filter_output_data([tmp_path], keys, out, logger)
+        assert n == 0
+        # No output file created when source dirs have no OutputData.csv
+        # and no explicit columns were requested.
+        assert not out.exists()
 
-    def test_empty_keys(self, ancillary_fixture_dir, logger):
-        result = filter_output_data([ancillary_fixture_dir], set(), logger)
-        assert len(result) == 0
+    def test_empty_keys(self, ancillary_fixture_dir, tmp_path, logger):
+        out = tmp_path / "od.csv"
+        n = filter_output_data([ancillary_fixture_dir], set(), out, logger)
+        assert n == 0
+
+    def test_deduplicates_across_source_dirs(
+        self, ancillary_fixture_dir, tmp_path, logger,
+    ):
+        """Same OutputData.csv listed twice should not produce duplicate rows."""
+        keys = {("QC-32941101", "20131227_095204")}
+        out = tmp_path / "od.csv"
+        n = filter_output_data(
+            [ancillary_fixture_dir, ancillary_fixture_dir], keys, out, logger,
+        )
+        assert n == 1
+        result = pd.read_csv(out)
+        assert len(result) == 1
+
+    def test_column_filtering(self, ancillary_fixture_dir, processed_df, tmp_path, logger):
+        """Only requested columns should appear in the output."""
+        keys = build_matching_keys(processed_df)
+        out = tmp_path / "od.csv"
+        cols = ["Sample No.", "AnalyzeDate", "AnalyzeTime", "RBC"]
+        n = filter_output_data(
+            [ancillary_fixture_dir], keys, out, logger, columns=cols,
+        )
+        assert n == 4
+        result = pd.read_csv(out)
+        assert list(result.columns) == cols
 
 
 # ---------------------------------------------------------------------------
@@ -272,3 +304,17 @@ class TestCopyMatchingSctFiles:
         out.mkdir()
         n = copy_matching_sct_files([tmp_path], keys, str(out), logger)
         assert n == 0
+
+    def test_deduplicates_across_source_dirs(
+        self, ancillary_fixture_dir, tmp_path, logger,
+    ):
+        """Same SCT dir listed twice should not re-copy files."""
+        keys = {("QC-41531101", "20140822_090826")}
+        out = tmp_path / "SCT"
+        out.mkdir()
+        n = copy_matching_sct_files(
+            [ancillary_fixture_dir, ancillary_fixture_dir],
+            keys, str(out), logger,
+        )
+        # 4 channels, written once (not 8)
+        assert n == 4
