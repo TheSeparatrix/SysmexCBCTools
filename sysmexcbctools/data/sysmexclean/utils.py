@@ -150,6 +150,7 @@ def load_dataframes(file_paths, logger):
         raise ValueError("No valid dataframes loaded")
 
     df = pd.concat(dfs, axis=0).reset_index(drop=True)
+    del dfs  # free individual DataFrames while concatenated copy exists
     logger.info(f"Combined dataframe shape: {df.shape}")
 
     return df
@@ -190,13 +191,36 @@ def get_memory_usage():
     return process.memory_info().rss / (1024**3)
 
 
+_last_memory_checkpoint: float | None = None
+
+
 def log_memory_usage(logger, step_name):
-    """Log current memory usage and trigger garbage collection."""
-    memory_before = get_memory_usage()
+    """Log current memory usage and change since the last checkpoint.
+
+    Calls ``gc.collect()`` first so that unreferenced objects are freed
+    before measuring, then reports the delta since the previous call.
+
+    The old implementation only measured how much ``gc.collect()`` freed
+    at that instant, which was almost always 0 because pandas DataFrames
+    are freed by CPython reference counting, not the cyclic GC.  It also
+    could not capture any freeing at all when the *caller* still held a
+    reference to the old DataFrame (which is the normal case for every
+    ``df = some_step(df, ...)`` call in ``_process_pipeline``).
+    """
+    global _last_memory_checkpoint
     gc.collect()
-    memory_after = get_memory_usage()
-    logger.info(f"{step_name} - Memory usage: {memory_after:.2f}GB (freed {memory_before-memory_after:.2f}GB)")
-    return memory_after
+    current = get_memory_usage()
+    if _last_memory_checkpoint is not None:
+        delta = current - _last_memory_checkpoint
+        sign = "+" if delta >= 0 else ""
+        logger.info(
+            f"{step_name} - Memory: {current:.2f}GB "
+            f"({sign}{delta:.2f}GB since last checkpoint)"
+        )
+    else:
+        logger.info(f"{step_name} - Memory: {current:.2f}GB")
+    _last_memory_checkpoint = current
+    return current
 
 
 def chunked_correlation(df, chunk_size=10000, logger=None):
