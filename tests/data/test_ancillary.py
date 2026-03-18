@@ -406,12 +406,14 @@ class TestIterArchiveChunks:
 
 def _make_archive_df(
     decoded_filename, channel, sample_no, date_time, data_cols,
+    *, analyzer="XN-10^36677", unknown="00-22-123",
 ):
     """Helper to build a small archive-style DataFrame."""
-    n = len(list(data_cols.values())[0])
     df = pd.DataFrame(data_cols)
     df["decoded_filename"] = decoded_filename
     df["channel"] = channel
+    df["analyzer"] = analyzer
+    df["unknown"] = unknown
     df["sample_no"] = sample_no
     df["date_time"] = date_time
     return df
@@ -522,7 +524,10 @@ class TestReconstructSctFromArchives:
             [str(archive_path)], matching_keys, str(out_dir), logger,
         )
         result = pd.read_csv(out_dir / wdf_base_filename)
-        for col in ("decoded_filename", "channel", "date_time", "sample_no"):
+        for col in (
+            "decoded_filename", "channel", "analyzer", "unknown",
+            "date_time", "sample_no",
+        ):
             assert col not in result.columns
 
     def test_all_nan_columns_dropped(self, tmp_path, logger, wdf_base_filename, matching_keys):

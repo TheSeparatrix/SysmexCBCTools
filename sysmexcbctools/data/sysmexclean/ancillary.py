@@ -92,7 +92,8 @@ _OVERFLOW_SUFFIX_RE = re.compile(r"\.116\(\d+\)\.csv$")
 
 # Metadata columns added during archive consolidation (not in original SCT files)
 _ARCHIVE_METADATA_COLS = frozenset({
-    "decoded_filename", "channel", "date_time", "sample_no",
+    "decoded_filename", "channel", "analyzer", "unknown",
+    "date_time", "sample_no",
 })
 
 # Lowercase archive column name -> original SCT column name
@@ -257,10 +258,20 @@ def reconstruct_sct_from_archives(
     accumulated: dict[str, list[pd.DataFrame]] = {}
     written_files: set[str] = set()
 
-    for archive_path in archive_files:
+    n_archives = len(archive_files)
+    logger.info(
+        "Processing %d SCT archive file(s) for reconstruction", n_archives,
+    )
+
+    for archive_idx, archive_path in enumerate(archive_files, 1):
         if not Path(archive_path).exists():
             logger.warning("Archive file not found: %s -- skipping", archive_path)
             continue
+
+        logger.info(
+            "Reading SCT archive %d/%d: %s",
+            archive_idx, n_archives, Path(archive_path).name,
+        )
 
         for chunk in _iter_archive_chunks(archive_path, chunk_size):
             if "decoded_filename" not in chunk.columns:
