@@ -11,11 +11,17 @@ from __future__ import annotations
 import logging
 import os
 import re
-from collections.abc import Iterator
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
+from tqdm import tqdm
+
+try:
+    import duckdb
+except ImportError:
+    duckdb = None  # type: ignore[assignment]
 
 # ---------------------------------------------------------------------------
 # Matching key construction
@@ -173,51 +179,125 @@ def _parse_sct_decoded_filename(filename: str) -> tuple[str, str] | None:
     return _parse_sct_filename(_normalize_overflow_filename(filename))
 
 
-def _iter_archive_chunks(
-    path: str | Path, chunk_size: int,
-) -> "Iterator[pd.DataFrame]":
-    """Yield DataFrames from a CSV or Parquet archive file.
+def _ensure_parquet(
+    archive_path: str | Path, logger: logging.Logger,
+) -> Path:
+    """Convert a CSV archive to Parquet if needed, returning the Parquet path.
+
+    For ``.parquet`` or ``.pq`` files the path is returned unchanged.
+    For ``.csv`` files a sibling ``.parquet`` is created (streamed via
+    duckdb so memory stays bounded) and its path is returned.  If the
+    sibling already exists the conversion is skipped.
 
     Parameters
     ----------
-    path : str or Path
-        Path to a ``.csv`` or ``.parquet``/``.pq`` archive.
-    chunk_size : int
-        Approximate number of rows per chunk.
+    archive_path : str or Path
+        Path to a ``.csv``, ``.parquet``, or ``.pq`` archive.
+    logger : logging.Logger
+        Logger for conversion messages.
 
-    Yields
-    ------
-    chunk : pd.DataFrame
+    Returns
+    -------
+    parquet_path : Path
+        Path to the Parquet file (original or newly created).
 
     Raises
     ------
     ValueError
         If the file extension is not recognised.
-    ImportError
-        If reading Parquet and *pyarrow* is not installed.
     """
-    path = Path(path)
+    path = Path(archive_path)
     ext = path.suffix.lower()
 
-    if ext == ".csv":
-        with pd.read_csv(path, chunksize=chunk_size) as reader:
-            yield from reader
-    elif ext in {".parquet", ".pq"}:
-        try:
-            import pyarrow.parquet as pq
-        except ImportError:
-            raise ImportError(
-                "pyarrow is required to read Parquet archives. "
-                "Install it with: pip install pyarrow"
-            )
-        pf = pq.ParquetFile(path)
-        for batch in pf.iter_batches(batch_size=chunk_size):
-            yield batch.to_pandas()
-    else:
+    if ext in {".parquet", ".pq"}:
+        return path
+
+    if ext != ".csv":
         raise ValueError(
             f"Unsupported archive extension '{ext}'. "
             "Expected .csv, .parquet, or .pq."
         )
+
+    parquet_path = path.with_suffix(".parquet")
+    if parquet_path.exists():
+        logger.info(
+            "Using existing Parquet conversion: %s", parquet_path.name,
+        )
+        return parquet_path
+
+    logger.info("Converting CSV archive to Parquet: %s", path.name)
+    csv_escaped = str(path).replace("'", "''")
+    pq_escaped = str(parquet_path).replace("'", "''")
+    duckdb.sql(
+        f"COPY (SELECT * FROM '{csv_escaped}') "
+        f"TO '{pq_escaped}' (FORMAT PARQUET)"
+    )
+    return parquet_path
+
+
+def _build_sct_index(
+    archive_paths: list[Path],
+    matching_keys: set[tuple[str, str]],
+    logger: logging.Logger,
+) -> dict[str, tuple[Path, list[str]]]:
+    """Build an index of matching SCT base filenames across archives.
+
+    Reads only the ``decoded_filename`` column from each archive
+    (extremely fast via Parquet column projection), then filters against
+    *matching_keys*.
+
+    Parameters
+    ----------
+    archive_paths : list of Path
+        Paths to Parquet archive files.
+    matching_keys : set of (str, str)
+        Composite keys ``(sample_no, YYYYMMDD_HHMMSS)``.
+    logger : logging.Logger
+        Logger for warnings.
+
+    Returns
+    -------
+    index : dict[str, tuple[Path, list[str]]]
+        Mapping of ``base_filename`` to
+        ``(archive_path, [decoded_filename_variants])``.  If the same
+        *base_filename* appears in multiple archives only the first
+        archive encountered is used.
+    """
+    index: dict[str, tuple[Path, list[str]]] = {}
+
+    for archive_path in archive_paths:
+        path_escaped = str(archive_path).replace("'", "''")
+        try:
+            filenames = duckdb.sql(
+                f"SELECT DISTINCT decoded_filename "
+                f"FROM '{path_escaped}'"
+            ).fetchdf()["decoded_filename"]
+        except duckdb.BinderException:
+            logger.warning(
+                "Archive %s missing 'decoded_filename' column -- skipping",
+                archive_path,
+            )
+            continue
+
+        # Group decoded_filename variants by normalised base filename
+        base_groups: dict[str, list[str]] = defaultdict(list)
+        for fn in filenames:
+            base_fn = _normalize_overflow_filename(fn)
+            base_groups[base_fn].append(fn)
+
+        for base_fn, variants in base_groups.items():
+            if base_fn in index:
+                continue  # first-archive-wins deduplication
+
+            parsed = _parse_sct_filename(base_fn)
+            if parsed is None:
+                continue
+
+            sample_no, dt_str = parsed
+            if (sample_no, dt_str) in matching_keys:
+                index[base_fn] = (archive_path, variants)
+
+    return index
 
 
 def reconstruct_sct_from_archives(
@@ -228,12 +308,16 @@ def reconstruct_sct_from_archives(
     *,
     chunk_size: int = 500_000,
 ) -> int:
-    """Reconstruct individual SCT files from consolidated archive CSVs.
+    """Reconstruct individual SCT files from consolidated archives.
 
-    The archives contain rows from many samples with lowercase column
-    names and extra metadata columns.  This function filters to matching
-    samples, drops metadata and all-NaN columns, restores original
-    column casing, and writes one CSV per original base filename.
+    Uses a three-phase approach for efficiency:
+
+    1. **Normalise** -- convert any CSV archives to Parquet (streamed,
+       bounded memory).
+    2. **Index** -- read only the ``decoded_filename`` column to identify
+       which files to reconstruct.
+    3. **Write** -- fetch each file's rows via Parquet predicate pushdown
+       and write them as individual SCT CSVs with a progress bar.
 
     Parameters
     ----------
@@ -247,82 +331,75 @@ def reconstruct_sct_from_archives(
     logger : logging.Logger
         Logger for warnings and progress messages.
     chunk_size : int, default=500_000
-        Rows per chunk when streaming archives.
+        Kept for backward compatibility; ignored.
 
     Returns
     -------
     n_written : int
         Number of SCT files written.
-    """
-    out_dir = Path(output_sct_dir)
-    accumulated: dict[str, list[pd.DataFrame]] = {}
-    written_files: set[str] = set()
 
+    Raises
+    ------
+    ImportError
+        If *duckdb* is not installed.
+    """
+    if duckdb is None:
+        raise ImportError(
+            "duckdb is required for SCT archive reconstruction. "
+            "Install it with: pip install 'sysmexcbctools[data]'"
+        )
+
+    out_dir = Path(output_sct_dir)
     n_archives = len(archive_files)
     logger.info(
         "Processing %d SCT archive file(s) for reconstruction", n_archives,
     )
 
-    for archive_idx, archive_path in enumerate(archive_files, 1):
+    # Phase 1 -- Normalise: ensure all archives are Parquet
+    parquet_paths: list[Path] = []
+    for archive_path in archive_files:
         if not Path(archive_path).exists():
-            logger.warning("Archive file not found: %s -- skipping", archive_path)
-            continue
-
-        logger.info(
-            "Reading SCT archive %d/%d: %s",
-            archive_idx, n_archives, Path(archive_path).name,
-        )
-
-        for chunk in _iter_archive_chunks(archive_path, chunk_size):
-            if "decoded_filename" not in chunk.columns:
-                logger.warning(
-                    "Archive %s missing 'decoded_filename' column -- skipping chunk",
-                    archive_path,
-                )
-                continue
-
-            # Normalise filenames and parse keys
-            chunk = chunk.copy()
-            chunk["_base_filename"] = chunk["decoded_filename"].apply(
-                _normalize_overflow_filename
+            logger.warning(
+                "Archive file not found: %s -- skipping", archive_path,
             )
-            chunk["_parsed"] = chunk["_base_filename"].apply(_parse_sct_filename)
+            continue
+        parquet_paths.append(_ensure_parquet(archive_path, logger))
 
-            for base_fn, group in chunk.groupby("_base_filename"):
-                parsed = group["_parsed"].iloc[0]
-                if parsed is None:
-                    continue
-                sample_no, dt_str = parsed
-                if (sample_no, dt_str) not in matching_keys:
-                    continue
-                if base_fn in written_files:
-                    continue
+    # Phase 2 -- Index: lightweight scan of decoded_filename only
+    index = _build_sct_index(parquet_paths, matching_keys, logger)
+    logger.info("Found %d matching SCT files to reconstruct", len(index))
 
-                rows = group.drop(columns=["_base_filename", "_parsed"])
-                accumulated.setdefault(base_fn, []).append(rows)
-
-    # Write accumulated data
+    # Phase 3 -- Write: one file at a time with progress bar
     n_written = 0
-    for base_fn, frames in accumulated.items():
-        if base_fn in written_files:
+    for base_fn, (archive_path, variants) in tqdm(
+        index.items(), desc="Reconstructing SCT files", unit="file",
+    ):
+        dest = out_dir / base_fn
+        if dest.exists():
             continue
 
-        merged = pd.concat(frames, axis=0, ignore_index=True)
+        path_escaped = str(archive_path).replace("'", "''")
+        placeholders = ", ".join(
+            f"'{v.replace(chr(39), chr(39) + chr(39))}'" for v in variants
+        )
+        df = duckdb.sql(
+            f"SELECT * FROM '{path_escaped}' "
+            f"WHERE decoded_filename IN ({placeholders})"
+        ).fetchdf()
 
         # Drop metadata columns
-        meta_to_drop = [c for c in merged.columns if c in _ARCHIVE_METADATA_COLS]
-        merged = merged.drop(columns=meta_to_drop)
+        meta_to_drop = [c for c in df.columns if c in _ARCHIVE_METADATA_COLS]
+        df = df.drop(columns=meta_to_drop)
 
         # Drop all-NaN columns (restores channel-specific column sets)
-        merged = merged.dropna(axis=1, how="all")
+        df = df.dropna(axis=1, how="all")
 
         # Restore column casing
-        merged = merged.rename(
-            columns={c: _ARCHIVE_COLUMN_MAP.get(c, c) for c in merged.columns}
+        df = df.rename(
+            columns={c: _ARCHIVE_COLUMN_MAP.get(c, c) for c in df.columns}
         )
 
-        merged.to_csv(out_dir / base_fn, index=False)
-        written_files.add(base_fn)
+        df.to_csv(dest, index=False)
         n_written += 1
 
     logger.info(

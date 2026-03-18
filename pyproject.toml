@@ -43,6 +43,7 @@ dependencies = [
 [project.optional-dependencies]
 data = [
     "psutil>=5.8.0",
+    "duckdb>=0.9.0",
 ]
 
 transfer = [

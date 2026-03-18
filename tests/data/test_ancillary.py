@@ -8,8 +8,8 @@ import pandas as pd
 import pytest
 
 from sysmexcbctools.data.sysmexclean.ancillary import (
+    _ensure_parquet,
     _find_overflow_files,
-    _iter_archive_chunks,
     _normalize_overflow_filename,
     _parse_sct_decoded_filename,
     _parse_sct_filename,
@@ -368,36 +368,60 @@ class TestParseSctDecodedFilename:
 
 
 # ---------------------------------------------------------------------------
-# _iter_archive_chunks
+# _ensure_parquet
 # ---------------------------------------------------------------------------
 
-class TestIterArchiveChunks:
+class TestEnsureParquet:
 
-    def test_csv_yields_chunks(self, tmp_path):
+    @pytest.fixture(autouse=True)
+    def _require_duckdb(self):
+        pytest.importorskip("duckdb")
+
+    def test_csv_converts_to_parquet(self, tmp_path, logger):
+        """A CSV archive produces a sibling .parquet file."""
         df = pd.DataFrame({"a": range(10), "b": range(10, 20)})
         csv_path = tmp_path / "archive.csv"
         df.to_csv(csv_path, index=False)
 
-        chunks = list(_iter_archive_chunks(csv_path, chunk_size=4))
-        total_rows = sum(len(c) for c in chunks)
-        assert total_rows == 10
-        assert len(chunks) == 3  # 4 + 4 + 2
+        result = _ensure_parquet(csv_path, logger)
+        assert result == tmp_path / "archive.parquet"
+        assert result.exists()
+        restored = pd.read_parquet(result)
+        pd.testing.assert_frame_equal(restored, df)
 
-    def test_parquet_yields_chunks(self, tmp_path):
-        pytest.importorskip("pyarrow")
-        df = pd.DataFrame({"a": range(10), "b": range(10, 20)})
+    def test_existing_parquet_not_reconverted(self, tmp_path, logger):
+        """If .parquet already exists alongside CSV, return it without re-creating."""
+        csv_path = tmp_path / "archive.csv"
+        csv_path.write_text("a,b\n1,2\n")
         pq_path = tmp_path / "archive.parquet"
-        df.to_parquet(pq_path, index=False)
+        # Write a distinct Parquet so we can verify it was NOT overwritten
+        pd.DataFrame({"x": [99]}).to_parquet(pq_path, index=False)
 
-        chunks = list(_iter_archive_chunks(pq_path, chunk_size=4))
-        total_rows = sum(len(c) for c in chunks)
-        assert total_rows == 10
+        result = _ensure_parquet(csv_path, logger)
+        assert result == pq_path
+        restored = pd.read_parquet(result)
+        assert list(restored.columns) == ["x"]  # original, not from CSV
 
-    def test_bad_extension_raises(self, tmp_path):
+    def test_parquet_input_returned_as_is(self, tmp_path, logger):
+        """A .parquet archive returns its own path unchanged."""
+        pq_path = tmp_path / "archive.parquet"
+        pd.DataFrame({"a": [1]}).to_parquet(pq_path, index=False)
+
+        assert _ensure_parquet(pq_path, logger) == pq_path
+
+    def test_pq_extension_accepted(self, tmp_path, logger):
+        """A .pq archive returns its own path unchanged."""
+        pq_path = tmp_path / "archive.pq"
+        pd.DataFrame({"a": [1]}).to_parquet(pq_path, index=False)
+
+        assert _ensure_parquet(pq_path, logger) == pq_path
+
+    def test_bad_extension_raises(self, tmp_path, logger):
+        """Unsupported extension raises ValueError."""
         bad_path = tmp_path / "archive.xlsx"
         bad_path.touch()
         with pytest.raises(ValueError, match="Unsupported archive extension"):
-            list(_iter_archive_chunks(bad_path, chunk_size=100))
+            _ensure_parquet(bad_path, logger)
 
 
 # ---------------------------------------------------------------------------
@@ -420,6 +444,10 @@ def _make_archive_df(
 
 
 class TestReconstructSctFromArchives:
+
+    @pytest.fixture(autouse=True)
+    def _require_duckdb(self):
+        pytest.importorskip("duckdb")
 
     @pytest.fixture
     def wdf_base_filename(self):
@@ -649,10 +677,10 @@ class TestReconstructSctFromArchives:
         assert n == 0
 
     def test_missing_decoded_filename_warns(self, tmp_path, logger, matching_keys):
-        """A chunk without 'decoded_filename' should warn and skip."""
+        """An archive without 'decoded_filename' should warn and skip."""
         df = pd.DataFrame({"repeatcount": [1], "fsc": [100.0]})
-        archive_path = tmp_path / "bad.csv"
-        df.to_csv(archive_path, index=False)
+        archive_path = tmp_path / "bad.parquet"
+        df.to_parquet(archive_path, index=False)
 
         out_dir = tmp_path / "SCT"
         out_dir.mkdir()
