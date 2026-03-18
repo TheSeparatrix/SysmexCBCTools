@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
 
@@ -87,6 +88,26 @@ _SCT_FILENAME_RE = re.compile(
     re.VERBOSE,
 )
 
+_OVERFLOW_SUFFIX_RE = re.compile(r"\.116\(\d+\)\.csv$")
+
+# Metadata columns added during archive consolidation (not in original SCT files)
+_ARCHIVE_METADATA_COLS = frozenset({
+    "decoded_filename", "channel", "date_time", "sample_no",
+})
+
+# Lowercase archive column name -> original SCT column name
+_ARCHIVE_COLUMN_MAP: dict[str, str] = {
+    "repeatcount": "RepeatCount",
+    "phase": "Phase",
+    "particleid": "ParticleID",
+    "fsc": "FSC",
+    "ssc": "SSC",
+    "sfl": "SFL",
+    "fscw": "FSCW",
+    "fsclog": "FSClog",
+    "sflx2": "SFLx2",
+}
+
 
 def _parse_sct_filename(filename: str) -> tuple[str, str] | None:
     """Extract sample number and datetime from an SCT base filename.
@@ -108,6 +129,196 @@ def _parse_sct_filename(filename: str) -> tuple[str, str] | None:
         return None
     dt_str, sample_no = m.groups()
     return (sample_no.strip(), dt_str)
+
+
+# ---------------------------------------------------------------------------
+# Archive helpers (for reconstructing SCT files from consolidated archives)
+# ---------------------------------------------------------------------------
+
+def _normalize_overflow_filename(filename: str) -> str:
+    """Strip overflow suffix from an SCT filename.
+
+    Parameters
+    ----------
+    filename : str
+        SCT filename, possibly with an overflow suffix such as
+        ``.116(1).csv``.
+
+    Returns
+    -------
+    normalized : str
+        Filename with the overflow suffix replaced by ``.116.csv``.
+        If the filename has no overflow suffix it is returned unchanged.
+    """
+    return _OVERFLOW_SUFFIX_RE.sub(".116.csv", filename)
+
+
+def _parse_sct_decoded_filename(filename: str) -> tuple[str, str] | None:
+    """Parse a ``decoded_filename`` value from an SCT archive.
+
+    Normalises overflow suffixes before delegating to
+    :func:`_parse_sct_filename`.
+
+    Parameters
+    ----------
+    filename : str
+        Value from the ``decoded_filename`` column.
+
+    Returns
+    -------
+    result : tuple of (str, str) or None
+        ``(sample_no, datetime_str)`` on success, ``None`` on failure.
+    """
+    return _parse_sct_filename(_normalize_overflow_filename(filename))
+
+
+def _iter_archive_chunks(
+    path: str | Path, chunk_size: int,
+) -> "Iterator[pd.DataFrame]":
+    """Yield DataFrames from a CSV or Parquet archive file.
+
+    Parameters
+    ----------
+    path : str or Path
+        Path to a ``.csv`` or ``.parquet``/``.pq`` archive.
+    chunk_size : int
+        Approximate number of rows per chunk.
+
+    Yields
+    ------
+    chunk : pd.DataFrame
+
+    Raises
+    ------
+    ValueError
+        If the file extension is not recognised.
+    ImportError
+        If reading Parquet and *pyarrow* is not installed.
+    """
+    path = Path(path)
+    ext = path.suffix.lower()
+
+    if ext == ".csv":
+        with pd.read_csv(path, chunksize=chunk_size) as reader:
+            yield from reader
+    elif ext in {".parquet", ".pq"}:
+        try:
+            import pyarrow.parquet as pq
+        except ImportError:
+            raise ImportError(
+                "pyarrow is required to read Parquet archives. "
+                "Install it with: pip install pyarrow"
+            )
+        pf = pq.ParquetFile(path)
+        for batch in pf.iter_batches(batch_size=chunk_size):
+            yield batch.to_pandas()
+    else:
+        raise ValueError(
+            f"Unsupported archive extension '{ext}'. "
+            "Expected .csv, .parquet, or .pq."
+        )
+
+
+def reconstruct_sct_from_archives(
+    archive_files: list[str],
+    matching_keys: set[tuple[str, str]],
+    output_sct_dir: str | Path,
+    logger: logging.Logger,
+    *,
+    chunk_size: int = 500_000,
+) -> int:
+    """Reconstruct individual SCT files from consolidated archive CSVs.
+
+    The archives contain rows from many samples with lowercase column
+    names and extra metadata columns.  This function filters to matching
+    samples, drops metadata and all-NaN columns, restores original
+    column casing, and writes one CSV per original base filename.
+
+    Parameters
+    ----------
+    archive_files : list of str
+        Paths to archive files (``.csv``, ``.parquet``, or ``.pq``).
+    matching_keys : set of (str, str)
+        Composite keys ``(sample_no, YYYYMMDD_HHMMSS)`` of surviving
+        samples.
+    output_sct_dir : str or Path
+        Destination directory for reconstructed SCT files.
+    logger : logging.Logger
+        Logger for warnings and progress messages.
+    chunk_size : int, default=500_000
+        Rows per chunk when streaming archives.
+
+    Returns
+    -------
+    n_written : int
+        Number of SCT files written.
+    """
+    out_dir = Path(output_sct_dir)
+    accumulated: dict[str, list[pd.DataFrame]] = {}
+    written_files: set[str] = set()
+
+    for archive_path in archive_files:
+        if not Path(archive_path).exists():
+            logger.warning("Archive file not found: %s -- skipping", archive_path)
+            continue
+
+        for chunk in _iter_archive_chunks(archive_path, chunk_size):
+            if "decoded_filename" not in chunk.columns:
+                logger.warning(
+                    "Archive %s missing 'decoded_filename' column -- skipping chunk",
+                    archive_path,
+                )
+                continue
+
+            # Normalise filenames and parse keys
+            chunk = chunk.copy()
+            chunk["_base_filename"] = chunk["decoded_filename"].apply(
+                _normalize_overflow_filename
+            )
+            chunk["_parsed"] = chunk["_base_filename"].apply(_parse_sct_filename)
+
+            for base_fn, group in chunk.groupby("_base_filename"):
+                parsed = group["_parsed"].iloc[0]
+                if parsed is None:
+                    continue
+                sample_no, dt_str = parsed
+                if (sample_no, dt_str) not in matching_keys:
+                    continue
+                if base_fn in written_files:
+                    continue
+
+                rows = group.drop(columns=["_base_filename", "_parsed"])
+                accumulated.setdefault(base_fn, []).append(rows)
+
+    # Write accumulated data
+    n_written = 0
+    for base_fn, frames in accumulated.items():
+        if base_fn in written_files:
+            continue
+
+        merged = pd.concat(frames, axis=0, ignore_index=True)
+
+        # Drop metadata columns
+        meta_to_drop = [c for c in merged.columns if c in _ARCHIVE_METADATA_COLS]
+        merged = merged.drop(columns=meta_to_drop)
+
+        # Drop all-NaN columns (restores channel-specific column sets)
+        merged = merged.dropna(axis=1, how="all")
+
+        # Restore column casing
+        merged = merged.rename(
+            columns={c: _ARCHIVE_COLUMN_MAP.get(c, c) for c in merged.columns}
+        )
+
+        merged.to_csv(out_dir / base_fn, index=False)
+        written_files.add(base_fn)
+        n_written += 1
+
+    logger.info(
+        "Reconstructed %d SCT files from archives to %s",
+        n_written, output_sct_dir,
+    )
+    return n_written
 
 
 # ---------------------------------------------------------------------------

@@ -9,12 +9,16 @@ import pytest
 
 from sysmexcbctools.data.sysmexclean.ancillary import (
     _find_overflow_files,
+    _iter_archive_chunks,
+    _normalize_overflow_filename,
+    _parse_sct_decoded_filename,
     _parse_sct_filename,
     _read_and_merge_sct,
     build_matching_keys,
     copy_matching_sct_files,
     derive_source_dirs,
     filter_output_data,
+    reconstruct_sct_from_archives,
 )
 
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "ancillary"
@@ -318,3 +322,336 @@ class TestCopyMatchingSctFiles:
         )
         # 4 channels, written once (not 8)
         assert n == 4
+
+
+# ---------------------------------------------------------------------------
+# _normalize_overflow_filename
+# ---------------------------------------------------------------------------
+
+class TestNormalizeOverflowFilename:
+
+    def test_base_unchanged(self):
+        fname = "WDF_[XN-10^11036][00-15_5][20150203_091038][           QC-43211103].116.csv"
+        assert _normalize_overflow_filename(fname) == fname
+
+    def test_overflow_stripped(self):
+        fname = "WDF_[XN-10^11036][00-15_5][20150203_091038][           QC-43211103].116(1).csv"
+        expected = "WDF_[XN-10^11036][00-15_5][20150203_091038][           QC-43211103].116.csv"
+        assert _normalize_overflow_filename(fname) == expected
+
+    def test_higher_overflow_index(self):
+        fname = "RET_[XN-10^11036][00-15_5][20150203_091038][           QC-43211103].116(42).csv"
+        expected = "RET_[XN-10^11036][00-15_5][20150203_091038][           QC-43211103].116.csv"
+        assert _normalize_overflow_filename(fname) == expected
+
+    def test_non_sct_unchanged(self):
+        assert _normalize_overflow_filename("OutputData.csv") == "OutputData.csv"
+        assert _normalize_overflow_filename("README.md") == "README.md"
+
+
+# ---------------------------------------------------------------------------
+# _parse_sct_decoded_filename
+# ---------------------------------------------------------------------------
+
+class TestParseSctDecodedFilename:
+
+    def test_base_filename(self):
+        fname = "WDF_[XN-10^11036][00-15_5][20150203_091038][           QC-43211103].116.csv"
+        assert _parse_sct_decoded_filename(fname) == ("QC-43211103", "20150203_091038")
+
+    def test_overflow_filename(self):
+        fname = "WDF_[XN-10^11036][00-15_5][20150203_091038][           QC-43211103].116(1).csv"
+        assert _parse_sct_decoded_filename(fname) == ("QC-43211103", "20150203_091038")
+
+    def test_malformed_returns_none(self):
+        assert _parse_sct_decoded_filename("garbage.csv") is None
+
+
+# ---------------------------------------------------------------------------
+# _iter_archive_chunks
+# ---------------------------------------------------------------------------
+
+class TestIterArchiveChunks:
+
+    def test_csv_yields_chunks(self, tmp_path):
+        df = pd.DataFrame({"a": range(10), "b": range(10, 20)})
+        csv_path = tmp_path / "archive.csv"
+        df.to_csv(csv_path, index=False)
+
+        chunks = list(_iter_archive_chunks(csv_path, chunk_size=4))
+        total_rows = sum(len(c) for c in chunks)
+        assert total_rows == 10
+        assert len(chunks) == 3  # 4 + 4 + 2
+
+    def test_parquet_yields_chunks(self, tmp_path):
+        pytest.importorskip("pyarrow")
+        df = pd.DataFrame({"a": range(10), "b": range(10, 20)})
+        pq_path = tmp_path / "archive.parquet"
+        df.to_parquet(pq_path, index=False)
+
+        chunks = list(_iter_archive_chunks(pq_path, chunk_size=4))
+        total_rows = sum(len(c) for c in chunks)
+        assert total_rows == 10
+
+    def test_bad_extension_raises(self, tmp_path):
+        bad_path = tmp_path / "archive.xlsx"
+        bad_path.touch()
+        with pytest.raises(ValueError, match="Unsupported archive extension"):
+            list(_iter_archive_chunks(bad_path, chunk_size=100))
+
+
+# ---------------------------------------------------------------------------
+# reconstruct_sct_from_archives
+# ---------------------------------------------------------------------------
+
+def _make_archive_df(
+    decoded_filename, channel, sample_no, date_time, data_cols,
+):
+    """Helper to build a small archive-style DataFrame."""
+    n = len(list(data_cols.values())[0])
+    df = pd.DataFrame(data_cols)
+    df["decoded_filename"] = decoded_filename
+    df["channel"] = channel
+    df["sample_no"] = sample_no
+    df["date_time"] = date_time
+    return df
+
+
+class TestReconstructSctFromArchives:
+
+    @pytest.fixture
+    def wdf_base_filename(self):
+        return "WDF_[XN-10^11036][00-15_5][20150203_091038][           QC-43211103].116.csv"
+
+    @pytest.fixture
+    def pltf_base_filename(self):
+        return "PLTF_[XN-10^11041][00-15_5][20140822_090826][           QC-41531101].116.csv"
+
+    @pytest.fixture
+    def matching_keys(self):
+        return {
+            ("QC-43211103", "20150203_091038"),
+            ("QC-41531101", "20140822_090826"),
+        }
+
+    def _write_archive(self, path, frames):
+        combined = pd.concat(frames, ignore_index=True)
+        ext = path.suffix.lower()
+        if ext == ".csv":
+            combined.to_csv(path, index=False)
+        else:
+            combined.to_parquet(path, index=False)
+        return combined
+
+    def test_basic_reconstruction(self, tmp_path, logger, wdf_base_filename, matching_keys):
+        """Rows are reconstructed with correct content and columns."""
+        archive_df = _make_archive_df(
+            decoded_filename=wdf_base_filename,
+            channel="WDF",
+            sample_no="QC-43211103",
+            date_time="20150203_091038",
+            data_cols={
+                "repeatcount": [1, 1, 1],
+                "particleid": [10, 20, 30],
+                "fsc": [100.0, 200.0, 300.0],
+                "ssc": [50.0, 60.0, 70.0],
+                "sfl": [1.1, 2.2, 3.3],
+                "fscw": [0.5, 0.6, 0.7],
+            },
+        )
+        archive_path = tmp_path / "archive.csv"
+        self._write_archive(archive_path, [archive_df])
+
+        out_dir = tmp_path / "SCT"
+        out_dir.mkdir()
+        n = reconstruct_sct_from_archives(
+            [str(archive_path)], matching_keys, str(out_dir), logger,
+        )
+        assert n == 1
+        result = pd.read_csv(out_dir / wdf_base_filename)
+        assert len(result) == 3
+        assert list(result.columns) == [
+            "RepeatCount", "ParticleID", "FSC", "SSC", "SFL", "FSCW",
+        ]
+
+    def test_overflow_consolidation(self, tmp_path, logger, wdf_base_filename, matching_keys):
+        """Overflow files (.116(N).csv) are merged into one base file."""
+        overflow_fn = wdf_base_filename.replace(".116.csv", ".116(1).csv")
+        base_df = _make_archive_df(
+            decoded_filename=wdf_base_filename,
+            channel="WDF",
+            sample_no="QC-43211103",
+            date_time="20150203_091038",
+            data_cols={"repeatcount": [1, 1], "fsc": [100.0, 200.0]},
+        )
+        overflow_df = _make_archive_df(
+            decoded_filename=overflow_fn,
+            channel="WDF",
+            sample_no="QC-43211103",
+            date_time="20150203_091038",
+            data_cols={"repeatcount": [1], "fsc": [300.0]},
+        )
+        archive_path = tmp_path / "archive.csv"
+        self._write_archive(archive_path, [base_df, overflow_df])
+
+        out_dir = tmp_path / "SCT"
+        out_dir.mkdir()
+        n = reconstruct_sct_from_archives(
+            [str(archive_path)], matching_keys, str(out_dir), logger,
+        )
+        assert n == 1
+        result = pd.read_csv(out_dir / wdf_base_filename)
+        # Base (2) + overflow (1) = 3 rows
+        assert len(result) == 3
+
+    def test_metadata_columns_stripped(self, tmp_path, logger, wdf_base_filename, matching_keys):
+        """Archive metadata columns should not appear in the output."""
+        archive_df = _make_archive_df(
+            decoded_filename=wdf_base_filename,
+            channel="WDF",
+            sample_no="QC-43211103",
+            date_time="20150203_091038",
+            data_cols={"repeatcount": [1], "fsc": [100.0]},
+        )
+        archive_path = tmp_path / "archive.csv"
+        self._write_archive(archive_path, [archive_df])
+
+        out_dir = tmp_path / "SCT"
+        out_dir.mkdir()
+        reconstruct_sct_from_archives(
+            [str(archive_path)], matching_keys, str(out_dir), logger,
+        )
+        result = pd.read_csv(out_dir / wdf_base_filename)
+        for col in ("decoded_filename", "channel", "date_time", "sample_no"):
+            assert col not in result.columns
+
+    def test_all_nan_columns_dropped(self, tmp_path, logger, wdf_base_filename, matching_keys):
+        """Columns that are all-NaN should be dropped (channel-specific restoration)."""
+        import numpy as np
+        archive_df = _make_archive_df(
+            decoded_filename=wdf_base_filename,
+            channel="WDF",
+            sample_no="QC-43211103",
+            date_time="20150203_091038",
+            data_cols={
+                "repeatcount": [1, 2],
+                "fsc": [100.0, 200.0],
+                "phase": [np.nan, np.nan],  # WDF doesn't have Phase
+                "fsclog": [np.nan, np.nan],  # WDF doesn't have FSClog
+            },
+        )
+        archive_path = tmp_path / "archive.csv"
+        self._write_archive(archive_path, [archive_df])
+
+        out_dir = tmp_path / "SCT"
+        out_dir.mkdir()
+        reconstruct_sct_from_archives(
+            [str(archive_path)], matching_keys, str(out_dir), logger,
+        )
+        result = pd.read_csv(out_dir / wdf_base_filename)
+        assert "Phase" not in result.columns
+        assert "FSClog" not in result.columns
+        assert "RepeatCount" in result.columns
+        assert "FSC" in result.columns
+
+    def test_column_case_restored(self, tmp_path, logger, wdf_base_filename, matching_keys):
+        """Lowercase archive columns should be renamed to original casing."""
+        archive_df = _make_archive_df(
+            decoded_filename=wdf_base_filename,
+            channel="WDF",
+            sample_no="QC-43211103",
+            date_time="20150203_091038",
+            data_cols={"repeatcount": [1], "particleid": [10], "sflx2": [1.5]},
+        )
+        archive_path = tmp_path / "archive.csv"
+        self._write_archive(archive_path, [archive_df])
+
+        out_dir = tmp_path / "SCT"
+        out_dir.mkdir()
+        reconstruct_sct_from_archives(
+            [str(archive_path)], matching_keys, str(out_dir), logger,
+        )
+        result = pd.read_csv(out_dir / wdf_base_filename)
+        assert "RepeatCount" in result.columns
+        assert "ParticleID" in result.columns
+        assert "SFLx2" in result.columns
+
+    def test_non_matching_excluded(self, tmp_path, logger, wdf_base_filename):
+        """Rows for non-matching samples should not produce output files."""
+        archive_df = _make_archive_df(
+            decoded_filename=wdf_base_filename,
+            channel="WDF",
+            sample_no="QC-43211103",
+            date_time="20150203_091038",
+            data_cols={"repeatcount": [1], "fsc": [100.0]},
+        )
+        archive_path = tmp_path / "archive.csv"
+        self._write_archive(archive_path, [archive_df])
+
+        out_dir = tmp_path / "SCT"
+        out_dir.mkdir()
+        # Keys that don't match anything in the archive
+        n = reconstruct_sct_from_archives(
+            [str(archive_path)],
+            {("NONEXISTENT", "20200101_120000")},
+            str(out_dir),
+            logger,
+        )
+        assert n == 0
+        assert list(out_dir.iterdir()) == []
+
+    def test_deduplication_across_archives(
+        self, tmp_path, logger, wdf_base_filename, matching_keys,
+    ):
+        """The same file appearing in two archives should only be written once."""
+        archive_df = _make_archive_df(
+            decoded_filename=wdf_base_filename,
+            channel="WDF",
+            sample_no="QC-43211103",
+            date_time="20150203_091038",
+            data_cols={"repeatcount": [1], "fsc": [100.0]},
+        )
+        a1 = tmp_path / "archive1.csv"
+        a2 = tmp_path / "archive2.csv"
+        self._write_archive(a1, [archive_df])
+        self._write_archive(a2, [archive_df])
+
+        out_dir = tmp_path / "SCT"
+        out_dir.mkdir()
+        n = reconstruct_sct_from_archives(
+            [str(a1), str(a2)], matching_keys, str(out_dir), logger,
+        )
+        assert n == 1
+
+    def test_empty_archive_returns_zero(self, tmp_path, logger, matching_keys):
+        """An archive with no matching rows should return 0."""
+        df = pd.DataFrame({
+            "decoded_filename": [],
+            "channel": [],
+            "sample_no": [],
+            "date_time": [],
+            "repeatcount": [],
+            "fsc": [],
+        })
+        archive_path = tmp_path / "empty.csv"
+        df.to_csv(archive_path, index=False)
+
+        out_dir = tmp_path / "SCT"
+        out_dir.mkdir()
+        n = reconstruct_sct_from_archives(
+            [str(archive_path)], matching_keys, str(out_dir), logger,
+        )
+        assert n == 0
+
+    def test_missing_decoded_filename_warns(self, tmp_path, logger, matching_keys):
+        """A chunk without 'decoded_filename' should warn and skip."""
+        df = pd.DataFrame({"repeatcount": [1], "fsc": [100.0]})
+        archive_path = tmp_path / "bad.csv"
+        df.to_csv(archive_path, index=False)
+
+        out_dir = tmp_path / "SCT"
+        out_dir.mkdir()
+        n = reconstruct_sct_from_archives(
+            [str(archive_path)], matching_keys, str(out_dir), logger,
+        )
+        assert n == 0

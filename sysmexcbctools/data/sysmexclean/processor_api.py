@@ -270,6 +270,7 @@ class XNSampleProcessor:
         copy_output_data: bool = False,
         copy_sct: bool = False,
         output_data_columns: list[str] | None = None,
+        sct_archive_files: str | list[str] | None = None,
     ) -> pd.DataFrame:
         """
         Process XN_SAMPLE data from files or a pre-loaded DataFrame.
@@ -294,13 +295,20 @@ class XNSampleProcessor:
             If True, copy matching SCT files from each source directory
             into ``output_dir/SCT/``, consolidating overflow files.
             Requires *input_files* to be file paths (not a DataFrame) and
-            *save_output* to be True.
+            *save_output* to be True (unless *sct_archive_files* is
+            provided).
         output_data_columns : list of str, optional
             If given, only these columns are written to the filtered
             OutputData CSV.  Useful for reducing file size when only
             metadata and a few measurement columns are needed (e.g.
             ``["Sample No.", "AnalyzeDate", "AnalyzeTime", "RBC", "PLT"]``).
             Ignored when *copy_output_data* is False.
+        sct_archive_files : str or list of str, optional
+            Paths to consolidated SCT archive files (``.csv``,
+            ``.parquet``, or ``.pq``).  When provided with
+            ``copy_sct=True``, individual SCT files are reconstructed
+            from these archives instead of being copied from source
+            directories.  This allows ``input_files`` to be a DataFrame.
 
         Returns
         -------
@@ -310,8 +318,9 @@ class XNSampleProcessor:
         Raises
         ------
         ValueError
-            If *copy_output_data* or *copy_sct* is True but *input_files*
-            is a DataFrame (source directories cannot be derived), or if
+            If *copy_output_data* or *copy_sct* (without
+            *sct_archive_files*) is True but *input_files* is a
+            DataFrame (source directories cannot be derived), or if
             *save_output* is False (no output directory to write to).
 
         Examples
@@ -340,12 +349,28 @@ class XNSampleProcessor:
         ...     copy_output_data=True,
         ...     copy_sct=True,
         ... )
+
+        Reconstruct SCT files from archives:
+
+        >>> df = processor.process_files(
+        ...     raw_df,
+        ...     save_output=True,
+        ...     copy_sct=True,
+        ...     sct_archive_files=["archive_WDF.csv", "archive_RET.parquet"],
+        ... )
         """
+        # Normalise sct_archive_files to list or None
+        if isinstance(sct_archive_files, str):
+            sct_archive_files = [sct_archive_files]
+
         # Validate ancillary copy options
-        if (copy_output_data or copy_sct) and isinstance(input_files, pd.DataFrame):
+        needs_source_dirs = copy_output_data or (
+            copy_sct and sct_archive_files is None
+        )
+        if needs_source_dirs and isinstance(input_files, pd.DataFrame):
             raise ValueError(
-                "copy_output_data and copy_sct require file paths as input_files, "
-                "not a DataFrame (source directories cannot be derived)."
+                "copy_output_data (and copy_sct without sct_archive_files) "
+                "require file paths as input_files, not a DataFrame."
             )
         if (copy_output_data or copy_sct) and not save_output:
             raise ValueError(
@@ -384,10 +409,14 @@ class XNSampleProcessor:
                 copy_matching_sct_files,
                 derive_source_dirs,
                 filter_output_data,
+                reconstruct_sct_from_archives,
             )
 
             keys = build_matching_keys(df)
-            source_dirs = derive_source_dirs(input_file_paths)
+
+            # Only derive source directories when needed
+            if copy_output_data or (copy_sct and sct_archive_files is None):
+                source_dirs = derive_source_dirs(input_file_paths)
 
             if copy_output_data:
                 od_filename = f"OutputData_{dataset_name}_{dt_string}.csv"
@@ -404,9 +433,14 @@ class XNSampleProcessor:
             if copy_sct:
                 sct_dir = os.path.join(self.output_dir, "SCT")
                 os.makedirs(sct_dir, exist_ok=True)
-                n_copied = copy_matching_sct_files(
-                    source_dirs, keys, sct_dir, self.logger
-                )
+                if sct_archive_files is not None:
+                    n_copied = reconstruct_sct_from_archives(
+                        sct_archive_files, keys, sct_dir, self.logger,
+                    )
+                else:
+                    n_copied = copy_matching_sct_files(
+                        source_dirs, keys, sct_dir, self.logger,
+                    )
                 self.diagnostic_files_["sct_dir"] = sct_dir
                 self.logger.info(
                     f"Copied {n_copied} SCT files to {sct_dir}"

@@ -89,7 +89,7 @@ class TestAncillaryCopyValidation:
                 minimal_df, copy_output_data=True, save_output=True
             )
 
-    def test_copy_sct_with_dataframe_raises(self, processor, minimal_df):
+    def test_copy_sct_with_dataframe_no_archive_raises(self, processor, minimal_df):
         with pytest.raises(ValueError, match="not a DataFrame"):
             processor.process_files(
                 minimal_df, copy_sct=True, save_output=True
@@ -107,6 +107,34 @@ class TestAncillaryCopyValidation:
                 str(csv_file), copy_sct=True, save_output=False
             )
 
+    def test_sct_archive_with_dataframe_allowed(self, processor, minimal_df):
+        """copy_sct + sct_archive_files should NOT raise with DataFrame input."""
+        with mock.patch.object(
+            processor, "_process_pipeline", return_value=minimal_df
+        ), mock.patch(
+            "sysmexcbctools.data.sysmexclean.ancillary.build_matching_keys",
+            return_value=set(),
+        ), mock.patch(
+            "sysmexcbctools.data.sysmexclean.ancillary.reconstruct_sct_from_archives",
+            return_value=0,
+        ) as mock_reconstruct:
+            processor.process_files(
+                minimal_df,
+                save_output=True,
+                copy_sct=True,
+                sct_archive_files=["archive.csv"],
+            )
+        mock_reconstruct.assert_called_once()
+
+    def test_sct_archive_without_save_raises(self, processor, minimal_df):
+        with pytest.raises(ValueError, match="save_output=True"):
+            processor.process_files(
+                minimal_df,
+                copy_sct=True,
+                save_output=False,
+                sct_archive_files=["archive.csv"],
+            )
+
     def test_ancillary_flags_default_false(self, processor, minimal_df):
         """By default, no ancillary files should be created."""
         with mock.patch.object(
@@ -116,3 +144,71 @@ class TestAncillaryCopyValidation:
 
         assert "output_data" not in processor.diagnostic_files_
         assert "sct_dir" not in processor.diagnostic_files_
+
+
+class TestSctArchiveDispatch:
+    """Verify that sct_archive_files routes to the correct function."""
+
+    def test_archive_dispatches_to_reconstruct(self, processor, minimal_df):
+        """With sct_archive_files, should call reconstruct_sct_from_archives."""
+        with mock.patch.object(
+            processor, "_process_pipeline", return_value=minimal_df
+        ), mock.patch(
+            "sysmexcbctools.data.sysmexclean.ancillary.build_matching_keys",
+            return_value=set(),
+        ), mock.patch(
+            "sysmexcbctools.data.sysmexclean.ancillary.reconstruct_sct_from_archives",
+            return_value=3,
+        ) as mock_reconstruct, mock.patch(
+            "sysmexcbctools.data.sysmexclean.ancillary.copy_matching_sct_files",
+        ) as mock_copy:
+            processor.process_files(
+                minimal_df,
+                save_output=True,
+                copy_sct=True,
+                sct_archive_files=["a.csv", "b.parquet"],
+            )
+        mock_reconstruct.assert_called_once()
+        mock_copy.assert_not_called()
+
+    def test_no_archive_dispatches_to_copy(self, processor, csv_file, minimal_df):
+        """Without sct_archive_files, should call copy_matching_sct_files."""
+        with mock.patch.object(
+            processor, "_process_pipeline", return_value=minimal_df
+        ), mock.patch(
+            "sysmexcbctools.data.sysmexclean.ancillary.build_matching_keys",
+            return_value=set(),
+        ), mock.patch(
+            "sysmexcbctools.data.sysmexclean.ancillary.reconstruct_sct_from_archives",
+        ) as mock_reconstruct, mock.patch(
+            "sysmexcbctools.data.sysmexclean.ancillary.copy_matching_sct_files",
+            return_value=2,
+        ) as mock_copy:
+            processor.process_files(
+                str(csv_file),
+                save_output=True,
+                copy_sct=True,
+            )
+        mock_copy.assert_called_once()
+        mock_reconstruct.assert_not_called()
+
+    def test_string_archive_normalised_to_list(self, processor, minimal_df):
+        """A single string sct_archive_files should be normalised to a list."""
+        with mock.patch.object(
+            processor, "_process_pipeline", return_value=minimal_df
+        ), mock.patch(
+            "sysmexcbctools.data.sysmexclean.ancillary.build_matching_keys",
+            return_value=set(),
+        ), mock.patch(
+            "sysmexcbctools.data.sysmexclean.ancillary.reconstruct_sct_from_archives",
+            return_value=0,
+        ) as mock_reconstruct:
+            processor.process_files(
+                minimal_df,
+                save_output=True,
+                copy_sct=True,
+                sct_archive_files="single_archive.csv",
+            )
+        # First positional arg should be a list
+        archive_arg = mock_reconstruct.call_args[0][0]
+        assert archive_arg == ["single_archive.csv"]
