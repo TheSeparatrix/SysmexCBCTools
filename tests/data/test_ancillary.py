@@ -387,7 +387,10 @@ class TestEnsureParquet:
         assert result == tmp_path / "archive.parquet"
         assert result.exists()
         restored = pd.read_parquet(result)
-        pd.testing.assert_frame_equal(restored, df)
+        # all_varchar=true means every column is stored as string
+        pd.testing.assert_frame_equal(
+            restored, df.astype(str), check_dtype=False,
+        )
 
     def test_existing_parquet_not_reconverted(self, tmp_path, logger):
         """If .parquet already exists alongside CSV, return it without re-creating."""

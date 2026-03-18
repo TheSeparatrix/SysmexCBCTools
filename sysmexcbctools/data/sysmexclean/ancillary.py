@@ -228,8 +228,10 @@ def _ensure_parquet(
     logger.info("Converting CSV archive to Parquet: %s", path.name)
     csv_escaped = str(path).replace("'", "''")
     pq_escaped = str(parquet_path).replace("'", "''")
+    # Read all columns as VARCHAR to avoid type-inference failures (e.g.
+    # sample_no looks numeric in the first rows but contains text later).
     duckdb.sql(
-        f"COPY (SELECT * FROM '{csv_escaped}') "
+        f"COPY (SELECT * FROM read_csv('{csv_escaped}', all_varchar=true)) "
         f"TO '{pq_escaped}' (FORMAT PARQUET)"
     )
     return parquet_path
