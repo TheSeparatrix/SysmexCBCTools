@@ -271,6 +271,7 @@ class XNSampleProcessor:
         copy_sct: bool = False,
         output_data_columns: list[str] | None = None,
         sct_archive_files: str | list[str] | None = None,
+        sample_nos: list[str] | None = None,
     ) -> pd.DataFrame:
         """
         Process XN_SAMPLE data from files or a pre-loaded DataFrame.
@@ -309,6 +310,14 @@ class XNSampleProcessor:
             ``copy_sct=True``, individual SCT files are reconstructed
             from these archives instead of being copied from source
             directories.  This allows ``input_files`` to be a DataFrame.
+        sample_nos : list of str, optional
+            If provided, only rows whose ``"Sample No."`` (after stripping
+            leading/trailing whitespace) appears in this list are retained.
+            Filtering occurs after the initial file load and merge but before
+            any processing steps, reducing both computation and peak memory.
+            Each entry is cast to ``str`` before comparison, so integer
+            sample numbers (e.g. ``123456``) are handled transparently.
+            Works with ``copy_output_data=True`` and ``copy_sct=True``.
 
         Returns
         -------
@@ -390,6 +399,17 @@ class XNSampleProcessor:
             df = load_dataframes(input_file_paths, self.logger)
         if self.enable_memory_monitoring:
             log_memory_usage(self.logger, f"After loading {dataset_name} dataset")
+
+        # Filter to requested sample numbers before any processing
+        if sample_nos is not None:
+            stripped_nos = {str(s).strip() for s in sample_nos}
+            mask = df["Sample No."].str.strip().isin(stripped_nos)
+            n_before = len(df)
+            df = df.loc[mask].reset_index(drop=True)
+            self.logger.info(
+                f"Retained {df['Sample No.'].nunique()} unique sample numbers "
+                f"({len(df)} / {n_before} rows) after sample_nos filter"
+            )
 
         # Run processing pipeline
         df = self._process_pipeline(df, dataset_name)
