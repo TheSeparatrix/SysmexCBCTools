@@ -607,8 +607,14 @@ def filter_output_data(
         kept_in_file = 0
         seen_in_file = 0
 
-        # Stream rows via duckdb's arrow iterator in bounded batches
-        reader = duckdb.sql(select_sql).to_arrow_reader(chunk_rows)
+        # Stream rows via duckdb's arrow iterator in bounded batches.
+        # Use the connection-level ``fetch_record_batch`` rather than a
+        # relation method: ``DuckDBPyRelation.__getattr__`` is overloaded to
+        # do column lookups, so attribute names that differ across versions
+        # (``to_arrow_reader`` / ``fetch_arrow_reader``) raise a confusing
+        # "no such column" error on older installations. Going via the
+        # connection sidesteps that and is available in every version.
+        reader = duckdb.execute(select_sql).fetch_record_batch(chunk_rows)
         for batch in reader:
             chunk = batch.to_pandas()
             if chunk.empty:
