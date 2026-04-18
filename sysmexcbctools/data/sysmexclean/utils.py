@@ -157,13 +157,61 @@ def load_dataframes(file_paths, logger):
 
 
 def save_results(df, output_path, logger):
-    """Save processed dataframe to CSV."""
-    # Create output directory if it doesn't exist
+    """Save the processed dataframe to disk.
+
+    Output format is inferred from the file extension:
+
+    - ``.csv`` -> pandas ``to_csv``
+    - ``.parquet`` / ``.pq`` -> pandas ``to_parquet`` (requires pyarrow)
+
+    Parquet is strongly recommended for large datasets: the resulting file
+    is much smaller and is written/read in a streaming fashion, avoiding
+    the multi-GB peak memory spike that CSV serialisation of millions of
+    rows can cause.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Processed dataframe to save.
+    output_path : str
+        Destination path. The extension determines the output format.
+    logger : logging.Logger
+        Logger for status messages.
+
+    Returns
+    -------
+    output_path : str
+        The path that was written.
+
+    Raises
+    ------
+    ValueError
+        If the file extension is not supported.
+    ImportError
+        If ``pyarrow`` is required but not installed.
+    """
     output_dir = os.path.dirname(output_path)
-    os.makedirs(output_dir, exist_ok=True)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
+    suffix = Path(output_path).suffix.lower()
 
     logger.info(f"Saving processed data to {output_path}")
-    df.to_csv(output_path, index=False)
+    if suffix == ".csv":
+        df.to_csv(output_path, index=False)
+    elif suffix in {".parquet", ".pq"}:
+        try:
+            df.to_parquet(output_path, index=False)
+        except ImportError:
+            raise ImportError(
+                "Writing parquet files requires pyarrow. "
+                "Install it with: pip install pyarrow"
+            )
+    else:
+        raise ValueError(
+            f"Unsupported output extension '{suffix}' for {output_path}. "
+            f"Supported: .csv, .parquet, .pq"
+        )
     logger.info(f"Saved {df.shape[0]} rows and {df.shape[1]} columns")
 
     return output_path

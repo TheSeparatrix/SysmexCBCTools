@@ -272,6 +272,7 @@ class XNSampleProcessor:
         output_data_columns: list[str] | None = None,
         sct_archive_files: str | list[str] | None = None,
         sample_nos: list[str] | None = None,
+        output_format: str = "csv",
     ) -> pd.DataFrame:
         """
         Process XN_SAMPLE data from files or a pre-loaded DataFrame.
@@ -310,6 +311,12 @@ class XNSampleProcessor:
             ``copy_sct=True``, individual SCT files are reconstructed
             from these archives instead of being copied from source
             directories.  This allows ``input_files`` to be a DataFrame.
+        output_format : {"csv", "parquet"}, default="csv"
+            Format used when *save_output* is True.  ``"parquet"`` is
+            strongly recommended for large datasets (hundreds of thousands
+            of rows and above): the resulting file is much smaller and
+            is written in a streaming fashion, avoiding the peak memory
+            spike of CSV serialisation.
         sample_nos : list of str, optional
             If provided, only rows whose ``"Sample No."`` (after stripping
             leading/trailing whitespace) appears in this list are retained.
@@ -416,9 +423,17 @@ class XNSampleProcessor:
 
         # Save results if requested
         if save_output:
+            fmt = output_format.lower()
+            ext_map = {"csv": "csv", "parquet": "parquet", "pq": "parquet"}
+            if fmt not in ext_map:
+                raise ValueError(
+                    f"Unsupported output_format '{output_format}'. "
+                    "Use 'csv' or 'parquet'."
+                )
+            ext = ext_map[fmt]
             now = datetime.now()
             dt_string = now.strftime("%Y%m%d_%H%M%S")
-            filename = f"{self.output_prefix}_{dataset_name}_{dt_string}.csv"
+            filename = f"{self.output_prefix}_{dataset_name}_{dt_string}.{ext}"
             output_path = os.path.join(self.output_dir, filename)
             save_results(df, output_path, self.logger)
 
@@ -439,7 +454,7 @@ class XNSampleProcessor:
                 source_dirs = derive_source_dirs(input_file_paths)
 
             if copy_output_data:
-                od_filename = f"OutputData_{dataset_name}_{dt_string}.csv"
+                od_filename = f"OutputData_{dataset_name}_{dt_string}.{ext}"
                 od_path = os.path.join(self.output_dir, od_filename)
                 n_od_rows = filter_output_data(
                     source_dirs, keys, od_path, self.logger,

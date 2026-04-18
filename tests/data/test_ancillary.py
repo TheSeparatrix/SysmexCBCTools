@@ -259,6 +259,48 @@ class TestFilterOutputData:
         result = pd.read_csv(out)
         assert list(result.columns) == cols
 
+    def test_parquet_output(
+        self, ancillary_fixture_dir, processed_df, tmp_path, logger,
+    ):
+        """Parquet output should contain the same rows as CSV output."""
+        pytest.importorskip("pyarrow")
+        keys = build_matching_keys(processed_df)
+        out_csv = tmp_path / "od.csv"
+        out_pq = tmp_path / "od.parquet"
+        n_csv = filter_output_data([ancillary_fixture_dir], keys, out_csv, logger)
+        n_pq = filter_output_data([ancillary_fixture_dir], keys, out_pq, logger)
+        assert n_csv == n_pq == 4
+        df_csv = pd.read_csv(out_csv).sort_values("Sample No.").reset_index(drop=True)
+        df_pq = pd.read_parquet(out_pq).sort_values("Sample No.").reset_index(drop=True)
+        assert set(df_pq["Sample No."]) == set(df_csv["Sample No."])
+        assert len(df_pq) == 4
+
+    def test_unsupported_extension_raises(
+        self, ancillary_fixture_dir, processed_df, tmp_path, logger,
+    ):
+        keys = build_matching_keys(processed_df)
+        out = tmp_path / "od.xlsx"
+        with pytest.raises(ValueError, match="Unsupported output extension"):
+            filter_output_data([ancillary_fixture_dir], keys, out, logger)
+
+    def test_small_chunk_rows_matches_large(
+        self, ancillary_fixture_dir, processed_df, tmp_path, logger,
+    ):
+        """Streaming in tiny chunks should produce the same result."""
+        keys = build_matching_keys(processed_df)
+        out_small = tmp_path / "od_small.csv"
+        out_big = tmp_path / "od_big.csv"
+        n_small = filter_output_data(
+            [ancillary_fixture_dir], keys, out_small, logger, chunk_rows=1,
+        )
+        n_big = filter_output_data(
+            [ancillary_fixture_dir], keys, out_big, logger, chunk_rows=10_000,
+        )
+        assert n_small == n_big == 4
+        df_small = pd.read_csv(out_small).sort_values("Sample No.").reset_index(drop=True)
+        df_big = pd.read_csv(out_big).sort_values("Sample No.").reset_index(drop=True)
+        pd.testing.assert_frame_equal(df_small, df_big)
+
 
 # ---------------------------------------------------------------------------
 # copy_matching_sct_files

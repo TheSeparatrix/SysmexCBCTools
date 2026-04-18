@@ -12,7 +12,6 @@ import logging
 import os
 import re
 from collections import defaultdict
-from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -42,14 +41,14 @@ def build_matching_keys(df: pd.DataFrame) -> set[tuple[str, str]]:
         Set of ``(sample_no, datetime_str)`` tuples where *datetime_str* is
         formatted as ``YYYYMMDD_HHMMSS``.
     """
-    keys: set[tuple[str, str]] = set()
-    for _, row in df.iterrows():
-        dt = datetime.strptime(
-            f"{row['Date']} {row['Time']}", "%Y/%m/%d %H:%M:%S"
-        )
-        dt_str = dt.strftime("%Y%m%d_%H%M%S")
-        keys.add((str(row["Sample No."]).strip(), dt_str))
-    return keys
+    if len(df) == 0:
+        return set()
+
+    combined = df["Date"].astype(str) + " " + df["Time"].astype(str)
+    dt = pd.to_datetime(combined, format="%Y/%m/%d %H:%M:%S", errors="raise")
+    dt_strs = dt.dt.strftime("%Y%m%d_%H%M%S")
+    sample_nos = df["Sample No."].astype(str).str.strip()
+    return set(zip(sample_nos, dt_strs, strict=True))
 
 
 def derive_source_dirs(input_files: list[str]) -> list[Path]:
@@ -476,12 +475,25 @@ def filter_output_data(
     logger: logging.Logger,
     *,
     columns: list[str] | None = None,
+    chunk_rows: int = 200_000,
 ) -> int:
-    """Load, filter, and incrementally write OutputData.csv rows to disk.
+    """Stream, filter, and incrementally write OutputData rows to disk.
 
-    Processes one source directory at a time and appends matching rows to
-    *output_path*, keeping peak memory low.  Rows that share a composite
-    key with a row already written are silently skipped (deduplication).
+    Each source directory's ``OutputData.csv`` is scanned in bounded chunks
+    via duckdb (all columns read as ``VARCHAR`` to avoid type-inference
+    issues), filtered against *matching_keys* with vectorised datetime
+    parsing, and appended to *output_path*.  Peak memory is therefore
+    independent of file size.  Rows that share a composite key with a row
+    already written are silently skipped (deduplication).
+
+    The output format is inferred from *output_path*'s extension:
+
+    - ``.csv`` -- appended row-wise via pandas.
+    - ``.parquet`` / ``.pq`` -- written as a single Parquet file, one
+      row-group per streamed chunk via ``pyarrow.parquet.ParquetWriter``.
+      Each column is written as a string (consistent with the
+      ``all_varchar=true`` read).  Recommended for large datasets --
+      the resulting file is several-fold smaller and round-trips faster.
 
     Parameters
     ----------
@@ -490,8 +502,8 @@ def filter_output_data(
     matching_keys : set of (str, str)
         Composite keys ``(sample_no, YYYYMMDD_HHMMSS)`` of surviving samples.
     output_path : str or Path
-        Destination CSV file.  Created (or overwritten) on first write,
-        then appended to.
+        Destination path (``.csv``, ``.parquet``, or ``.pq``).  Created
+        or overwritten on first write.
     logger : logging.Logger
         Logger for warnings.
     columns : list of str, optional
@@ -499,16 +511,56 @@ def filter_output_data(
         key columns (``Sample No.``, ``AnalyzeDate``, ``AnalyzeTime``)
         are always read from disk for matching but may be excluded from
         the output if not listed here.
+    chunk_rows : int, default=200_000
+        Approximate number of rows per streamed chunk.  Larger values
+        trade memory for fewer pandas round-trips.
 
     Returns
     -------
     n_written : int
         Total number of rows written.
+
+    Raises
+    ------
+    ImportError
+        If *duckdb* is not installed, or if parquet output is requested
+        but *pyarrow* is not installed.
+    ValueError
+        If *output_path* has an unsupported extension.
     """
+    if duckdb is None:
+        raise ImportError(
+            "duckdb is required for OutputData.csv filtering. "
+            "Install it with: pip install 'sysmexcbctools[data]'"
+        )
+
     output_path = Path(output_path)
+    suffix = output_path.suffix.lower()
+    if suffix == ".csv":
+        write_format = "csv"
+    elif suffix in {".parquet", ".pq"}:
+        write_format = "parquet"
+    else:
+        raise ValueError(
+            f"Unsupported output extension '{suffix}' for {output_path}. "
+            f"Supported: .csv, .parquet, .pq"
+        )
+
+    pq_writer = None  # lazy-initialised ParquetWriter
+    pq_schema = None
+    if write_format == "parquet":
+        try:
+            import pyarrow as pa  # noqa: F401
+            import pyarrow.parquet as pq  # noqa: F401
+        except ImportError:
+            raise ImportError(
+                "Writing parquet output requires pyarrow. "
+                "Install it with: pip install pyarrow"
+            )
+
     seen_keys: set[tuple[str, str]] = set()
     total_written = 0
-    header_written = False
+    header_written = False  # tracks whether any output has been produced
 
     _KEY_COLS = {"Sample No.", "AnalyzeDate", "AnalyzeTime"}
 
@@ -518,10 +570,25 @@ def filter_output_data(
             logger.warning("OutputData.csv not found in %s -- skipping", d)
             continue
 
-        # Determine which columns to load from disk
+        path_escaped = str(od_path).replace("'", "''")
+
+        # Probe header to determine available columns and column order
+        header_df = duckdb.sql(
+            f"SELECT * FROM read_csv('{path_escaped}', all_varchar=true) LIMIT 0"
+        ).fetchdf()
+        available = set(header_df.columns)
+
+        missing_keys = _KEY_COLS - available
+        if missing_keys:
+            logger.warning(
+                "OutputData.csv in %s missing key column(s) %s -- skipping",
+                d, ", ".join(sorted(missing_keys)),
+            )
+            continue
+
         if columns is not None:
-            available = set(pd.read_csv(od_path, nrows=0).columns)
-            load_cols = list((_KEY_COLS | set(columns)) & available)
+            load_cols = [c for c in header_df.columns
+                         if c in (_KEY_COLS | set(columns))]
             missing = set(columns) - available
             if missing:
                 logger.warning(
@@ -529,56 +596,95 @@ def filter_output_data(
                     d, ", ".join(sorted(missing)),
                 )
         else:
-            load_cols = None
+            load_cols = list(header_df.columns)
 
-        od = pd.read_csv(od_path, usecols=load_cols, low_memory=False)
+        col_list = ", ".join(f'"{c}"' for c in load_cols)
+        select_sql = (
+            f"SELECT {col_list} "
+            f"FROM read_csv('{path_escaped}', all_varchar=true)"
+        )
 
-        # Filter rows: must match a surviving sample and not already written
-        keep_indices: list[int] = []
-        for idx, row in od.iterrows():
-            try:
-                dt = datetime.strptime(
-                    f"{row['AnalyzeDate']} {row['AnalyzeTime']}",
-                    "%Y/%m/%d %H:%M:%S",
-                )
-            except (ValueError, TypeError):
+        kept_in_file = 0
+        seen_in_file = 0
+
+        # Stream rows via duckdb's arrow iterator in bounded batches
+        reader = duckdb.sql(select_sql).to_arrow_reader(chunk_rows)
+        for batch in reader:
+            chunk = batch.to_pandas()
+            if chunk.empty:
                 continue
-            dt_str = dt.strftime("%Y%m%d_%H%M%S")
-            sample_no = str(row["Sample No."]).strip()
-            key = (sample_no, dt_str)
-            if key in matching_keys and key not in seen_keys:
-                keep_indices.append(idx)
-                seen_keys.add(key)
+            seen_in_file += len(chunk)
 
-        filtered = od.loc[keep_indices]
+            combined = (
+                chunk["AnalyzeDate"].astype(str)
+                + " "
+                + chunk["AnalyzeTime"].astype(str)
+            )
+            dt = pd.to_datetime(
+                combined, format="%Y/%m/%d %H:%M:%S", errors="coerce",
+            )
+            sample_nos = chunk["Sample No."].astype(str).str.strip()
+            dt_strs = dt.dt.strftime("%Y%m%d_%H%M%S")
 
-        # Select only requested output columns
-        if columns is not None:
-            out_cols = [c for c in columns if c in filtered.columns]
-            filtered = filtered[out_cols]
+            candidates = pd.Series(
+                list(zip(sample_nos, dt_strs, strict=True)),
+                index=chunk.index,
+            )
+            in_match = dt.notna() & candidates.isin(matching_keys)
+            if not in_match.any():
+                continue
+
+            matched_pairs = candidates[in_match]
+            not_seen = ~matched_pairs.isin(seen_keys)
+            keep_pairs = matched_pairs[not_seen]
+            if keep_pairs.empty:
+                continue
+            seen_keys.update(keep_pairs.tolist())
+
+            filtered = chunk.loc[keep_pairs.index]
+            if columns is not None:
+                filtered = filtered[[c for c in columns
+                                     if c in filtered.columns]]
+
+            if write_format == "csv":
+                filtered.to_csv(
+                    output_path,
+                    mode="a" if header_written else "w",
+                    header=not header_written,
+                    index=False,
+                )
+            else:
+                import pyarrow as pa
+                import pyarrow.parquet as pq
+                table = pa.Table.from_pandas(filtered, preserve_index=False)
+                if pq_writer is None:
+                    pq_schema = table.schema
+                    pq_writer = pq.ParquetWriter(str(output_path), pq_schema)
+                else:
+                    # Ensure consistent schema across chunks
+                    table = table.cast(pq_schema, safe=False)
+                pq_writer.write_table(table)
+
+            header_written = True
+            total_written += len(filtered)
+            kept_in_file += len(filtered)
 
         logger.info(
             "OutputData.csv in %s: kept %d / %d rows",
-            d, len(filtered), len(od),
+            d, kept_in_file, seen_in_file,
         )
 
-        if not filtered.empty:
-            filtered.to_csv(
-                output_path,
-                mode="a" if header_written else "w",
-                header=not header_written,
-                index=False,
-            )
-            header_written = True
-            total_written += len(filtered)
-
-        # Free memory before loading next file
-        del od, filtered
+    if pq_writer is not None:
+        pq_writer.close()
 
     if not header_written and columns is not None:
         # Write an empty file with the requested column header so
-        # downstream code always finds a valid CSV.
-        pd.DataFrame(columns=columns).to_csv(output_path, index=False)
+        # downstream code always finds a valid output.
+        empty = pd.DataFrame(columns=columns)
+        if write_format == "csv":
+            empty.to_csv(output_path, index=False)
+        else:
+            empty.astype(str).to_parquet(output_path, index=False)
 
     return total_written
 

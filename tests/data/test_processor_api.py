@@ -212,3 +212,47 @@ class TestSctArchiveDispatch:
         # First positional arg should be a list
         archive_arg = mock_reconstruct.call_args[0][0]
         assert archive_arg == ["single_archive.csv"]
+
+
+class TestOutputFormat:
+    """Verify that output_format controls the saved file extension."""
+
+    def test_csv_default(self, processor, minimal_df, tmp_path):
+        with mock.patch.object(
+            processor, "_process_pipeline", return_value=minimal_df
+        ):
+            processor.process_files(
+                minimal_df, save_output=True, dataset_name="d",
+            )
+        saved = list(tmp_path.glob("*.csv"))
+        assert len(saved) == 1
+        assert saved[0].suffix == ".csv"
+
+    def test_parquet_output(self, processor, minimal_df, tmp_path):
+        pytest.importorskip("pyarrow")
+        with mock.patch.object(
+            processor, "_process_pipeline", return_value=minimal_df
+        ):
+            processor.process_files(
+                minimal_df,
+                save_output=True,
+                dataset_name="d",
+                output_format="parquet",
+            )
+        saved = list(tmp_path.glob("*.parquet"))
+        assert len(saved) == 1
+        # Round-trip check
+        restored = pd.read_parquet(saved[0])
+        assert len(restored) == len(minimal_df)
+
+    def test_invalid_format_raises(self, processor, minimal_df):
+        with mock.patch.object(
+            processor, "_process_pipeline", return_value=minimal_df
+        ):
+            with pytest.raises(ValueError, match="Unsupported output_format"):
+                processor.process_files(
+                    minimal_df,
+                    save_output=True,
+                    dataset_name="d",
+                    output_format="xml",
+                )
