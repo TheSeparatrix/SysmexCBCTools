@@ -599,9 +599,15 @@ def filter_output_data(
             load_cols = list(header_df.columns)
 
         col_list = ", ".join(f'"{c}"' for c in load_cols)
+        # ``ignore_errors=true`` skips malformed rows (e.g. truncated lines
+        # with fewer columns than the header). OutputData.csv is an
+        # instrument-generated log and occasionally contains such rows; a
+        # row missing most of its columns would fail the key match anyway,
+        # so silently skipping is safe.
         select_sql = (
             f"SELECT {col_list} "
-            f"FROM read_csv('{path_escaped}', all_varchar=true)"
+            f"FROM read_csv('{path_escaped}', "
+            f"all_varchar=true, ignore_errors=true)"
         )
 
         kept_in_file = 0
