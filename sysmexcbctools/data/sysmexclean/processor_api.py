@@ -438,53 +438,238 @@ class XNSampleProcessor:
             save_results(df, output_path, self.logger)
 
         # Copy ancillary files if requested
-        if copy_output_data or copy_sct:
-            from .ancillary import (
-                build_matching_keys,
-                copy_matching_sct_files,
-                derive_source_dirs,
-                filter_output_data,
-                reconstruct_sct_from_archives,
+        if copy_output_data:
+            od_filename = f"OutputData_{dataset_name}_{dt_string}.{ext}"
+            od_path = os.path.join(self.output_dir, od_filename)
+            self.copy_output_data(
+                df,
+                input_files=input_file_paths,
+                output_path=od_path,
+                columns=output_data_columns,
             )
 
-            keys = build_matching_keys(df)
-
-            # Only derive source directories when needed
-            if copy_output_data or (copy_sct and sct_archive_files is None):
-                source_dirs = derive_source_dirs(input_file_paths)
-
-            if copy_output_data:
-                od_filename = f"OutputData_{dataset_name}_{dt_string}.{ext}"
-                od_path = os.path.join(self.output_dir, od_filename)
-                n_od_rows = filter_output_data(
-                    source_dirs, keys, od_path, self.logger,
-                    columns=output_data_columns,
-                )
-                self.diagnostic_files_["output_data"] = od_path
-                self.logger.info(
-                    f"Saved {n_od_rows} filtered OutputData rows to {od_path}"
-                )
-
-            if copy_sct:
-                sct_dir = os.path.join(self.output_dir, "SCT")
-                os.makedirs(sct_dir, exist_ok=True)
-                if sct_archive_files is not None:
-                    n_copied = reconstruct_sct_from_archives(
-                        sct_archive_files, keys, sct_dir, self.logger,
-                    )
-                else:
-                    n_copied = copy_matching_sct_files(
-                        source_dirs, keys, sct_dir, self.logger,
-                    )
-                self.diagnostic_files_["sct_dir"] = sct_dir
-                self.logger.info(
-                    f"Copied {n_copied} SCT files to {sct_dir}"
-                )
+        if copy_sct:
+            sct_dir = os.path.join(self.output_dir, "SCT")
+            self.copy_sct(
+                df,
+                input_files=input_file_paths,
+                sct_archive_files=sct_archive_files,
+                output_dir=sct_dir,
+            )
 
         # Store for later access
         self.last_processed_ = df
 
         return df
+
+    def copy_output_data(
+        self,
+        keys_source: pd.DataFrame | str | list[str],
+        input_files: str | list[str],
+        *,
+        output_path: str | None = None,
+        columns: list[str] | None = None,
+        dataset_name: str = "dataset",
+    ) -> int:
+        """
+        Filter ``OutputData.csv`` rows matching a processed XN_SAMPLE dataset.
+
+        The matching keys ``(Sample No., YYYYMMDD_HHMMSS)`` are derived
+        from *keys_source* and used to select rows from the
+        ``OutputData.csv`` file in each source directory.  The filtered
+        rows are streamed to *output_path* (csv or parquet).
+
+        Parameters
+        ----------
+        keys_source : pd.DataFrame or str or list of str
+            Processed XN_SAMPLE-like data used to derive matching keys.
+            Accepts a DataFrame, a path to a ``.csv``/``.parquet``/``.pq``
+            file, or a list of such paths.  Must contain ``Sample No.``,
+            ``Date``, and ``Time`` columns.
+        input_files : str or list of str
+            Paths to raw XN_SAMPLE files whose parent directories contain
+            the source ``OutputData.csv`` files.  Their unique parent
+            directories are scanned.
+        output_path : str, optional
+            Destination file.  If ``None``, a path is built inside
+            ``self.output_dir`` using *dataset_name* and a timestamp.
+            Extension determines output format (``.csv`` or ``.parquet``).
+        columns : list of str, optional
+            If given, only these columns are written to the output file.
+        dataset_name : str, default="dataset"
+            Used to construct the default *output_path* filename when
+            *output_path* is not provided.
+
+        Returns
+        -------
+        n_written : int
+            Number of rows written.
+        """
+        from .ancillary import (
+            build_matching_keys,
+            derive_source_dirs,
+            filter_output_data,
+        )
+
+        if isinstance(input_files, str):
+            input_files = [input_files]
+        input_files = list(input_files)
+
+        keys_df = self._keys_source_to_dataframe(keys_source)
+        keys = build_matching_keys(keys_df)
+        source_dirs = derive_source_dirs(input_files)
+
+        if output_path is None:
+            dt_string = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_path = os.path.join(
+                self.output_dir,
+                f"OutputData_{dataset_name}_{dt_string}.csv",
+            )
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+
+        n_rows = filter_output_data(
+            source_dirs, keys, output_path, self.logger, columns=columns,
+        )
+        self.diagnostic_files_["output_data"] = output_path
+        self.logger.info(
+            f"Saved {n_rows} filtered OutputData rows to {output_path}"
+        )
+        return n_rows
+
+    def copy_sct(
+        self,
+        keys_source: pd.DataFrame | str | list[str],
+        *,
+        input_files: str | list[str] | None = None,
+        sct_archive_files: str | list[str] | None = None,
+        output_dir: str | None = None,
+    ) -> int:
+        """
+        Copy or reconstruct SCT files matching a processed XN_SAMPLE dataset.
+
+        Matching keys ``(Sample No., YYYYMMDD_HHMMSS)`` are derived from
+        *keys_source*.  SCT files can be obtained either by copying from
+        the ``SCT/`` subdirectory of each source directory (when
+        *input_files* is given) or by reconstructing individual files from
+        consolidated archives (when *sct_archive_files* is given).
+        Exactly one of the two must be provided.
+
+        Parameters
+        ----------
+        keys_source : pd.DataFrame or str or list of str
+            Processed XN_SAMPLE-like data used to derive matching keys.
+            Accepts a DataFrame, a path to a ``.csv``/``.parquet``/``.pq``
+            file, or a list of such paths.  Must contain ``Sample No.``,
+            ``Date``, and ``Time`` columns.
+        input_files : str or list of str, optional
+            Paths to raw XN_SAMPLE files whose parent directories contain
+            an ``SCT/`` subdirectory.  Mutually exclusive with
+            *sct_archive_files*.
+        sct_archive_files : str or list of str, optional
+            Paths to consolidated SCT archive files (``.csv``,
+            ``.parquet``, or ``.pq``) from which individual SCT files are
+            reconstructed.  Mutually exclusive with *input_files*.
+        output_dir : str, optional
+            Destination directory for SCT files.  Defaults to
+            ``{self.output_dir}/SCT``.
+
+        Returns
+        -------
+        n_written : int
+            Number of SCT files written.
+
+        Raises
+        ------
+        ValueError
+            If neither or both of *input_files* and *sct_archive_files*
+            are provided.
+        """
+        from .ancillary import (
+            build_matching_keys,
+            copy_matching_sct_files,
+            derive_source_dirs,
+            reconstruct_sct_from_archives,
+        )
+
+        if isinstance(sct_archive_files, str):
+            sct_archive_files = [sct_archive_files]
+        if isinstance(input_files, str):
+            input_files = [input_files]
+
+        if (input_files is None) == (sct_archive_files is None):
+            raise ValueError(
+                "Provide exactly one of input_files or sct_archive_files."
+            )
+
+        keys_df = self._keys_source_to_dataframe(keys_source)
+        keys = build_matching_keys(keys_df)
+
+        if output_dir is None:
+            output_dir = os.path.join(self.output_dir, "SCT")
+        os.makedirs(output_dir, exist_ok=True)
+
+        if sct_archive_files is not None:
+            n_copied = reconstruct_sct_from_archives(
+                list(sct_archive_files), keys, output_dir, self.logger,
+            )
+        else:
+            source_dirs = derive_source_dirs(list(input_files))
+            n_copied = copy_matching_sct_files(
+                source_dirs, keys, output_dir, self.logger,
+            )
+
+        self.diagnostic_files_["sct_dir"] = output_dir
+        self.logger.info(f"Copied {n_copied} SCT files to {output_dir}")
+        return n_copied
+
+    def _keys_source_to_dataframe(
+        self, keys_source: pd.DataFrame | str | list[str],
+    ) -> pd.DataFrame:
+        """Load a keys source into a DataFrame with only Sample No./Date/Time.
+
+        Only the three columns needed to build matching keys are read from
+        disk, keeping peak memory bounded even for very large processed
+        XN_SAMPLE files.
+        """
+        key_cols = ["Sample No.", "Date", "Time"]
+
+        if isinstance(keys_source, pd.DataFrame):
+            return keys_source
+
+        if isinstance(keys_source, str):
+            paths = [keys_source]
+        else:
+            paths = list(keys_source)
+
+        frames: list[pd.DataFrame] = []
+        for p in paths:
+            suffix = os.path.splitext(p)[1].lower()
+            if suffix == ".csv":
+                frames.append(
+                    pd.read_csv(
+                        p,
+                        usecols=key_cols,
+                        encoding="ISO-8859-1",
+                        dtype=str,
+                    )
+                )
+            elif suffix in {".parquet", ".pq"}:
+                try:
+                    frames.append(pd.read_parquet(p, columns=key_cols))
+                except ImportError:
+                    raise ImportError(
+                        "Reading parquet files requires pyarrow. "
+                        "Install it with: pip install pyarrow"
+                    )
+            else:
+                raise ValueError(
+                    f"Unsupported file extension '{suffix}' for {p}. "
+                    "Supported: .csv, .parquet, .pq"
+                )
+            self.logger.info(
+                f"Loaded {len(frames[-1])} key rows from {p}"
+            )
+        return pd.concat(frames, axis=0, ignore_index=True)
 
     def process(self, dataset_name: str) -> pd.DataFrame:
         """
