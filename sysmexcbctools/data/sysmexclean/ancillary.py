@@ -22,6 +22,28 @@ try:
 except ImportError:
     duckdb = None  # type: ignore[assignment]
 
+# Explicit duckdb ``read_csv`` options for OutputData.csv.
+#
+# OutputData.csv is an instrument-generated log and is occasionally
+# malformed (truncated lines, stray quotes, very long rows).  DuckDB's
+# automatic dialect sniffer raises ``InvalidInputException`` when it cannot
+# confidently detect the parsing dialect of such files.  We therefore pin
+# the dialect (comma-delimited, standard double-quote quoting/escaping)
+# instead of relying on the sniffer, and enable tolerant parsing so that
+# individual bad rows are skipped rather than aborting the whole read.
+#
+#   - ``all_varchar``    : read every column as text (no type inference)
+#   - ``delim``/``quote``/``escape`` : pin the dialect, bypassing the sniffer
+#   - ``ignore_errors``  : skip rows that do not conform to the dialect
+#   - ``null_padding``   : pad short rows with NULLs instead of failing
+#   - ``strict_mode``    : tolerate rows that break the CSV standard
+#   - ``max_line_size``  : allow very long lines (instrument logs can be wide)
+_OUTPUTDATA_READ_OPTS = (
+    "all_varchar=true, delim=',', quote='\"', escape='\"', "
+    "ignore_errors=true, null_padding=true, strict_mode=false, "
+    "max_line_size=10000000"
+)
+
 # ---------------------------------------------------------------------------
 # Matching key construction
 # ---------------------------------------------------------------------------
@@ -572,10 +594,21 @@ def filter_output_data(
 
         path_escaped = str(od_path).replace("'", "''")
 
-        # Probe header to determine available columns and column order
-        header_df = duckdb.sql(
-            f"SELECT * FROM read_csv('{path_escaped}', all_varchar=true) LIMIT 0"
-        ).fetchdf()
+        # Probe header to determine available columns and column order.
+        # A genuinely corrupted file can defeat even the pinned-dialect read
+        # (e.g. an unreadable header line); skip it with a warning rather
+        # than aborting the whole run.
+        try:
+            header_df = duckdb.sql(
+                f"SELECT * FROM read_csv('{path_escaped}', "
+                f"{_OUTPUTDATA_READ_OPTS}) LIMIT 0"
+            ).fetchdf()
+        except duckdb.Error as exc:
+            logger.warning(
+                "OutputData.csv in %s could not be read (%s) -- skipping",
+                d, exc,
+            )
+            continue
         available = set(header_df.columns)
 
         missing_keys = _KEY_COLS - available
@@ -599,15 +632,15 @@ def filter_output_data(
             load_cols = list(header_df.columns)
 
         col_list = ", ".join(f'"{c}"' for c in load_cols)
-        # ``ignore_errors=true`` skips malformed rows (e.g. truncated lines
-        # with fewer columns than the header). OutputData.csv is an
-        # instrument-generated log and occasionally contains such rows; a
-        # row missing most of its columns would fail the key match anyway,
-        # so silently skipping is safe.
+        # ``_OUTPUTDATA_READ_OPTS`` pins the dialect and enables tolerant
+        # parsing so malformed rows (e.g. truncated lines with fewer columns
+        # than the header) are skipped rather than aborting the read.
+        # OutputData.csv is an instrument-generated log and occasionally
+        # contains such rows; a row missing most of its columns would fail
+        # the key match anyway, so silently skipping is safe.
         select_sql = (
             f"SELECT {col_list} "
-            f"FROM read_csv('{path_escaped}', "
-            f"all_varchar=true, ignore_errors=true)"
+            f"FROM read_csv('{path_escaped}', {_OUTPUTDATA_READ_OPTS})"
         )
 
         kept_in_file = 0
@@ -620,8 +653,35 @@ def filter_output_data(
         # (``to_arrow_reader`` / ``fetch_arrow_reader``) raise a confusing
         # "no such column" error on older installations. Going via the
         # connection sidesteps that and is available in every version.
-        reader = duckdb.execute(select_sql).fetch_record_batch(chunk_rows)
-        for batch in reader:
+        # A corrupted file can still raise mid-stream; skip the rest of it
+        # with a warning rather than aborting the whole run.  Rows already
+        # written for this file are preserved.  The read is driven one batch
+        # at a time so peak memory stays bounded -- the iterator is never
+        # fully materialised.
+        try:
+            reader = duckdb.execute(select_sql).fetch_record_batch(chunk_rows)
+        except duckdb.Error as exc:
+            logger.warning(
+                "OutputData.csv in %s failed during read (%s) -- skipping",
+                d, exc,
+            )
+            continue
+
+        while True:
+            # Fetch the next batch in its own guard so a mid-stream read
+            # error is distinguished from an error in our row processing.
+            try:
+                batch = reader.read_next_batch()
+            except StopIteration:
+                break
+            except duckdb.Error as exc:
+                logger.warning(
+                    "OutputData.csv in %s failed mid-stream (%s) -- "
+                    "keeping rows already written, skipping the rest",
+                    d, exc,
+                )
+                break
+
             chunk = batch.to_pandas()
             if chunk.empty:
                 continue
