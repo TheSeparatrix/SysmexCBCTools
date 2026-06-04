@@ -10,6 +10,8 @@ import psutil
 import yaml
 from tqdm import tqdm
 
+from .constants import ID_COLUMNS
+
 
 def setup_logging(config):
     """Set up logging configuration with both file and console outputs."""
@@ -88,17 +90,28 @@ def _read_single_file(path, logger):
     """
     suffix = Path(path).suffix.lower()
 
+    # Identifier columns are always read as strings so that purely numeric
+    # cohorts are not silently inferred as int/float (see ID_COLUMNS).
     if suffix == ".csv":
-        return pd.read_csv(path, encoding="ISO-8859-1", low_memory=False)
+        return pd.read_csv(
+            path,
+            encoding="ISO-8859-1",
+            low_memory=False,
+            dtype={col: str for col in ID_COLUMNS},
+        )
 
     if suffix in {".parquet", ".pq"}:
         try:
-            return pd.read_parquet(path)
+            df = pd.read_parquet(path)
         except ImportError:
             raise ImportError(
                 "Reading parquet files requires pyarrow. "
                 "Install it with: pip install pyarrow"
             )
+        for col in ID_COLUMNS:
+            if col in df.columns:
+                df[col] = df[col].astype(str)
+        return df
 
     raise ValueError(
         f"Unsupported file extension '{suffix}' for {path}. "
@@ -222,6 +235,10 @@ def convert_to_numeric(df, logger):
     logger.info("Converting all columns to numeric")
 
     for col in df.columns:
+        # Never coerce identifier columns: a numeric sample number must stay
+        # a string so it matches OutputData/SCT keys (see ID_COLUMNS).
+        if col in ID_COLUMNS:
+            continue
         try:
             df[col] = pd.to_numeric(df[col])
         except:

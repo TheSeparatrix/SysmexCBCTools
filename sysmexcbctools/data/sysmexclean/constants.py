@@ -1,3 +1,11 @@
+# Identifier columns that must never be type-inferred as numeric.  Sample
+# numbers are identifiers, not quantities: a purely numeric cohort would
+# otherwise be read as int/float, breaking string operations (e.g.
+# ``.str.startswith``) and the ``(Sample No., datetime)`` matching keys used
+# to align OutputData.csv and SCT files (a float ``123456.0`` never matches
+# the string ``123456``).  Always read these as ``str``.
+ID_COLUMNS = ["Sample No."]
+
 # List of standard FBC parameters in XN_SAMPLE notation
 STANDARD_FBC_DECRYPT = [
     "WBC(10^3/uL)",

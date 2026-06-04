@@ -45,6 +45,77 @@ _OUTPUTDATA_READ_OPTS = (
 )
 
 # ---------------------------------------------------------------------------
+# Sample number normalisation
+# ---------------------------------------------------------------------------
+
+# Characters stripped from both ends of a sample number before matching.
+# Sample numbers occasionally carry leading/trailing separators (spaces,
+# hyphens, underscores) that differ between the XN_SAMPLE table, the
+# OutputData.csv log, and the SCT filename encoding.  Normalising all three
+# the same way prevents spurious match failures.  ``str.strip`` with this
+# character set removes any combination of these characters from each end.
+_SAMPLE_NO_STRIP = " -_"
+
+
+def _normalize_sample_no(value: object) -> str:
+    """Normalise a single sample number for matching.
+
+    Casts to ``str`` and strips leading/trailing spaces, hyphens, and
+    underscores (in any combination).
+    """
+    return str(value).strip(_SAMPLE_NO_STRIP)
+
+
+def _normalize_sample_no_series(values: pd.Series) -> pd.Series:
+    """Vectorised :func:`_normalize_sample_no` for a pandas Series."""
+    return values.astype(str).str.strip(_SAMPLE_NO_STRIP)
+
+
+def _log_unmatched_keys(
+    matching_keys: set[tuple[str, str]],
+    matched_keys: set[tuple[str, str]],
+    label: str,
+    logger: logging.Logger,
+    *,
+    preview: int = 20,
+) -> None:
+    """Debug-log which surviving samples had no match in an ancillary source.
+
+    Reconciles the surviving XN_SAMPLE keys (*matching_keys*) against the
+    keys that were actually found in an ancillary source (*matched_keys*).
+    A large unmatched count for SCT relative to OutputData is the typical
+    signature of missing or unparseable SCT files.  Emitted at ``DEBUG``
+    level so it stays out of normal output unless ``verbose >= 2``.
+
+    Parameters
+    ----------
+    matching_keys : set of (str, str)
+        All surviving ``(sample_no, datetime)`` keys from XN_SAMPLE.
+    matched_keys : set of (str, str)
+        Keys found in this ancillary source.
+    label : str
+        Human-readable source name (e.g. ``"OutputData"`` or ``"SCT"``).
+    logger : logging.Logger
+        Logger to emit debug messages on.
+    preview : int, default=20
+        Maximum number of unmatched keys to list.
+    """
+    n_total = len(matching_keys)
+    unmatched = matching_keys - matched_keys
+    n_matched = n_total - len(unmatched)
+    logger.debug(
+        "%s reconciliation: %d / %d surviving samples matched, %d unmatched",
+        label, n_matched, n_total, len(unmatched),
+    )
+    if unmatched:
+        sample = sorted(unmatched)[:preview]
+        logger.debug(
+            "%s: surviving samples with no match (showing %d of %d): %s",
+            label, len(sample), len(unmatched), sample,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Matching key construction
 # ---------------------------------------------------------------------------
 
@@ -69,7 +140,7 @@ def build_matching_keys(df: pd.DataFrame) -> set[tuple[str, str]]:
     combined = df["Date"].astype(str) + " " + df["Time"].astype(str)
     dt = pd.to_datetime(combined, format="%Y/%m/%d %H:%M:%S", errors="raise")
     dt_strs = dt.dt.strftime("%Y%m%d_%H%M%S")
-    sample_nos = df["Sample No."].astype(str).str.strip()
+    sample_nos = _normalize_sample_no_series(df["Sample No."])
     return set(zip(sample_nos, dt_strs, strict=True))
 
 
@@ -156,7 +227,7 @@ def _parse_sct_filename(filename: str) -> tuple[str, str] | None:
     if m is None:
         return None
     dt_str, sample_no = m.groups()
-    return (sample_no.strip(), dt_str)
+    return (_normalize_sample_no(sample_no), dt_str)
 
 
 # ---------------------------------------------------------------------------
@@ -391,6 +462,13 @@ def reconstruct_sct_from_archives(
     # Phase 2 -- Index: lightweight scan of decoded_filename only
     index = _build_sct_index(parquet_paths, matching_keys, logger)
     logger.info("Found %d matching SCT files to reconstruct", len(index))
+
+    matched_keys = {
+        parsed
+        for base_fn in index
+        if (parsed := _parse_sct_filename(base_fn)) is not None
+    }
+    _log_unmatched_keys(matching_keys, matched_keys, "SCT (archive)", logger)
 
     # Phase 3 -- Write: one file at a time with progress bar
     n_written = 0
@@ -695,7 +773,7 @@ def filter_output_data(
             dt = pd.to_datetime(
                 combined, format="%Y/%m/%d %H:%M:%S", errors="coerce",
             )
-            sample_nos = chunk["Sample No."].astype(str).str.strip()
+            sample_nos = _normalize_sample_no_series(chunk["Sample No."])
             dt_strs = dt.dt.strftime("%Y%m%d_%H%M%S")
 
             candidates = pd.Series(
@@ -749,6 +827,8 @@ def filter_output_data(
     if pq_writer is not None:
         pq_writer.close()
 
+    _log_unmatched_keys(matching_keys, seen_keys, "OutputData", logger)
+
     if not header_written and columns is not None:
         # Write an empty file with the requested column header so
         # downstream code always finds a valid output.
@@ -791,6 +871,7 @@ def copy_matching_sct_files(
     """
     n_written = 0
     out_dir = Path(output_sct_dir)
+    matched_keys: set[tuple[str, str]] = set()
 
     for d in source_dirs:
         sct_dir = d / "SCT"
@@ -811,6 +892,7 @@ def copy_matching_sct_files(
             sample_no, dt_str = parsed
             if (sample_no, dt_str) not in matching_keys:
                 continue
+            matched_keys.add((sample_no, dt_str))
 
             # Skip duplicates across source directories
             dest = out_dir / entry.name
@@ -827,5 +909,6 @@ def copy_matching_sct_files(
             merged.to_csv(dest, index=False)
             n_written += 1
 
+    _log_unmatched_keys(matching_keys, matched_keys, "SCT", logger)
     logger.info("Wrote %d SCT files to %s", n_written, output_sct_dir)
     return n_written
