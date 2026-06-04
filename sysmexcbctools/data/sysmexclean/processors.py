@@ -202,24 +202,33 @@ def encode_flags(df, logger):
     """Encode various flags and indicators as binary values."""
     logger.info("Encoding flags and IP messages")
 
-    # Encode Positive/Error flags
+    # Encode Positive/Error flags: null or 0 -> 0, anything else -> 1.
+    #
+    # The encoded result is built on an object-dtype copy and assigned back
+    # as a fresh integer column.  Mutating the source column in place would
+    # write integers into a text column, which raises under pandas >= 3.0
+    # (where columns read from CSV default to the ``str`` dtype).  Operating
+    # on an object copy preserves the original two-step semantics exactly.
     for col in df.columns:
         if col.startswith("Positive") or col.startswith("Error"):
-            df.loc[df[col].isna(), col] = 0
-            df.loc[~(df[col] == 0), col] = 1
-            df[col] = df[col].astype(int)
+            s = df[col].astype(object)
+            s[s.isna()] = 0
+            s[s != 0] = 1
+            df[col] = s.astype(int)
 
-    # Encode Abnormal or Suspect flags
+    # Encode Abnormal or Suspect flags: null -> 0, else original (numeric).
     for col in df.columns:
         if col.endswith("Abnormal") or col.endswith("Suspect"):
-            df.loc[df[col].isna(), col] = 0
-            df[col] = df[col].astype(int)
+            s = df[col].astype(object)
+            s[s.isna()] = 0
+            df[col] = s.astype(int)
 
-    # Encode IP flags
+    # Encode IP flags: null -> 0, else original (numeric).
     for col in df.columns:
         if col.startswith("IP "):
-            df.loc[df[col].isna(), col] = 0
-            df[col] = df[col].astype(int)
+            s = df[col].astype(object)
+            s[s.isna()] = 0
+            df[col] = s.astype(int)
 
     # Process Q-Flag columns
     # Collect Q-Flag columns to avoid fragmentation from repeated column additions
@@ -234,13 +243,11 @@ def encode_flags(df, logger):
             new_columns[col + "_err"] = df[col].apply(lambda x: 1 if x == "ERROR" else 0)
             new_columns[col + "_disc"] = df[col].apply(lambda x: 1 if x == "DISCRETE" else 0)
 
-            # Modify original column
-            df.loc[df[col] == "ERROR", col] = np.nan
-            df.loc[df[col] == "DISCRETE", col] = np.nan
-
-            # Convert to numeric
-            df.loc[:, col] = pd.to_numeric(df.loc[:, col], errors="coerce")
-            df[col] = df[col].astype(float)
+            # Blank out ERROR/DISCRETE then coerce the remainder to float,
+            # assigning a fresh float column rather than writing floats into
+            # the source text column in place (rejected by pandas >= 3.0).
+            s = df[col].where(~df[col].isin(["ERROR", "DISCRETE"]))
+            df[col] = pd.to_numeric(s, errors="coerce").astype(float)
 
         # Add all new columns at once to avoid fragmentation
         if new_columns:
