@@ -153,7 +153,15 @@ def load_dataframes(file_paths, logger):
             df = _read_single_file(file, logger)
             dfs.append(df)
             logger.info(f"Successfully loaded {file} with {df.shape[0]} rows")
+        except (pd.errors.EmptyDataError, pd.errors.ParserError) as e:
+            # An empty or corrupted data file should not abort the whole run;
+            # skip it with a warning and continue with the remaining files.
+            # These subclass ValueError, so they must be handled before the
+            # re-raise clause below.
+            logger.warning(f"Skipping unreadable file {file}: {e}")
         except (ImportError, ValueError):
+            # Genuine configuration errors (unsupported extension, missing
+            # pyarrow) should still fail loudly.
             raise
         except Exception as e:
             logger.error(f"Error loading {file}: {e}")
