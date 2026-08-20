@@ -29,7 +29,7 @@ pip install -e ".[all]"
 
 - Python 3.7+
 - Required packages: pandas, numpy, pyyaml, tqdm, psutil
-- Optional (for large datasets): dask[dataframe], pyarrow
+- Optional (for parquet input/output): pyarrow
 
 ## Quick Start
 
@@ -201,9 +201,6 @@ Main class for processing Sysmex XN_SAMPLE data.
 - `make_dummy_marks` (bool, default=False): Create dummy variables for marks
 - `use_memory_optimized` (bool, default=True): Use memory-efficient processing
 - `enable_memory_monitoring` (bool, default=True): Log memory usage
-- `correlation_sample_size` (int, default=50000): Max rows for correlation analysis
-- `chunk_size` (int, default=1000): Chunk size for memory-optimized processing
-- `force_dask` (bool, default=False): Force Dask usage for testing
 - `output_dir` (str, default="./output"): Output directory
 - `output_prefix` (str, default="XN_SAMPLE_processed"): Output filename prefix
 - `log_to_file` (bool, default=False): Create log and diagnostic files

@@ -22,37 +22,17 @@ or obtaining official gating strategies from Sysmex.
 """
 
 import json
-import pickle
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 
 from .flow_gating_pipeline import FlowGate
 
 
-def load_gates_from_pickle(gate_file: str) -> Dict[str, FlowGate]:
+def load_gates(gate_file: str, channel: str) -> Dict[str, FlowGate]:
     """
-    Load gate definitions from pickle file.
-
-    Parameters
-    ----------
-    gate_file : str
-        Path to pickle file containing FlowGate objects
-
-    Returns
-    -------
-    gates : dict
-        Dictionary mapping population names to FlowGate objects
-    """
-    with open(gate_file, 'rb') as f:
-        gates = pickle.load(f)
-    return gates
-
-
-def load_gates_from_json(gate_file: str, channel: str) -> Dict[str, FlowGate]:
-    """
-    Load gate definitions from JSON file and convert to FlowGate objects.
+    Load gate definitions from a JSON file and convert to FlowGate objects.
 
     Parameters
     ----------
@@ -66,6 +46,12 @@ def load_gates_from_json(gate_file: str, channel: str) -> Dict[str, FlowGate]:
     gates : dict
         Dictionary mapping population names to FlowGate objects
     """
+    gate_path = Path(gate_file)
+    if gate_path.suffix != '.json':
+        raise ValueError(
+            f"Unsupported gate file format: {gate_path.suffix}. Must be .json"
+        )
+
     # Map channels to their coordinate names
     channel_coords = {
         'RET': ('SFL', 'FSC'),
@@ -73,99 +59,44 @@ def load_gates_from_json(gate_file: str, channel: str) -> Dict[str, FlowGate]:
         'WNR': ('SFL', 'FSC'),
         'PLTF': ('SFL', 'FSC'),
     }
-
     coords = channel_coords.get(channel, ('SFL', 'FSC'))
 
     with open(gate_file) as f:
         gates_data = json.load(f)
 
-    # Convert to FlowGate objects
-    gates = {}
-    for pop_name, vertices in gates_data.items():
-        if len(vertices) > 0:
-            gates[pop_name] = FlowGate(pop_name, vertices, coords)
-
-    return gates
+    return {
+        pop_name: FlowGate(pop_name, vertices, coords)
+        for pop_name, vertices in gates_data.items()
+        if len(vertices) > 0
+    }
 
 
-def load_gates(gate_file: str, channel: str) -> Dict[str, FlowGate]:
-    """
-    Load gate definitions from pickle or JSON file.
-
-    Parameters
-    ----------
-    gate_file : str
-        Path to gate file (.pkl or .json)
-    channel : str
-        Channel name (RET, WDF, WNR, PLTF)
-
-    Returns
-    -------
-    gates : dict
-        Dictionary mapping population names to FlowGate objects
-    """
-    gate_path = Path(gate_file)
-
-    if gate_path.suffix == '.pkl':
-        return load_gates_from_pickle(gate_file)
-    elif gate_path.suffix == '.json':
-        return load_gates_from_json(gate_file, channel)
-    else:
-        raise ValueError(f"Unsupported gate file format: {gate_path.suffix}. "
-                        f"Must be .pkl or .json")
-
-
-def find_default_gate_file(channel: str, search_paths: Optional[List[str]] = None) -> Optional[str]:
+def find_default_gate_file(channel: str) -> Optional[str]:
     """
     Find the default gate file for a channel by searching common locations.
 
-    Searches for both pickle (.pkl) and JSON (.json) files, preferring pickle.
-
     Parameters
     ----------
     channel : str
         Channel name (RET, WDF, WNR, PLTF)
-    search_paths : list of str, optional
-        Additional paths to search. Default searches:
-        - ./flow_gates/
-        - ../flow_gates/
-        - ../../flow_gates/
-        - Package-relative paths
 
     Returns
     -------
     gate_file : str or None
         Path to gate file if found, else None
     """
-    if search_paths is None:
-        search_paths = []
-
-    # Add standard search paths
-    standard_paths = [
-        'flow_gates',
-        '../flow_gates',
-        '../../flow_gates',
+    filename = f'{channel}_gates.json'
+    search_paths = [
+        Path('flow_gates'),
+        Path('../flow_gates'),
+        Path('../../flow_gates'),
         Path(__file__).parent.parent / 'flow_gates',
     ]
-    search_paths = search_paths + standard_paths
 
-    # Try pickle first, then JSON
-    for ext in ['.pkl', '.json']:
-        filename = f'{channel}_gates{ext}'
-
-        for search_path in search_paths:
-            search_path = Path(search_path)
-
-            # Check root of search path
-            gate_file = search_path / filename
-            if gate_file.exists():
-                return str(gate_file)
-
-            # Check json_gates subdirectory (for JSON files)
-            if ext == '.json':
-                gate_file = search_path / 'json_gates' / filename
-                if gate_file.exists():
-                    return str(gate_file)
+    for search_path in search_paths:
+        for candidate in (search_path / 'json_gates' / filename, search_path / filename):
+            if candidate.exists():
+                return str(candidate)
 
     return None
 
@@ -221,165 +152,6 @@ def classify_points_by_gate(
         labels[in_gate] = i
 
     return labels, label_map
-
-
-def stratified_sample_by_gates(
-    data: np.ndarray,
-    gates: Dict[str, FlowGate],
-    target_samples: int = 1_000_000,
-    min_samples_per_gate: int = 50_000,
-    balance_method: str = 'sqrt',
-    random_state: Optional[int] = None,
-    column_indices: Tuple[int, int] = (0, 1),
-) -> Tuple[np.ndarray, Dict[str, int]]:
-    """
-    Perform stratified sampling using gate definitions to ensure rare populations
-    are adequately represented.
-
-    Parameters
-    ----------
-    data : ndarray of shape (n_samples, n_features)
-        Flow cytometry data points
-    gates : dict
-        Dictionary mapping population names to FlowGate objects
-    target_samples : int, default=1_000_000
-        Target number of samples in the output
-    min_samples_per_gate : int, default=50_000
-        Minimum number of samples to draw from each gated population
-    balance_method : str, default='sqrt'
-        Method for balancing populations:
-        - 'sqrt': Sample proportional to sqrt of population size (balances rare/common)
-        - 'equal': Sample equally from each population
-        - 'proportional': Sample proportionally (no balancing, equivalent to random sampling)
-    random_state : int, optional
-        Random seed for reproducibility
-    column_indices : tuple of int, default=(0, 1)
-        Which columns to use for gate classification
-
-    Returns
-    -------
-    sampled_data : ndarray of shape (n_sampled, n_features)
-        Stratified sample of data
-    sample_counts : dict
-        Number of samples drawn from each population
-    """
-    rng = np.random.default_rng(seed=random_state)
-
-    # Classify all points
-    labels, label_map = classify_points_by_gate(data, gates, column_indices)
-
-    # Count points in each population
-    unique_labels = np.unique(labels)
-    pop_counts = {label: np.sum(labels == label) for label in unique_labels}
-
-    print("  Gate-based stratified sampling:")
-    print(f"    Total data points: {len(data):,}")
-    for label, count in pop_counts.items():
-        pop_name = label_map.get(label, 'Ungated')
-        print(f"    {pop_name}: {count:,} ({count/len(data)*100:.1f}%)")
-
-    # Compute sampling weights based on balance method
-    if balance_method == 'sqrt':
-        # Sample proportional to sqrt of population size
-        # This gives rare populations more weight while not completely ignoring common ones
-        weights = {label: np.sqrt(count) for label, count in pop_counts.items()}
-    elif balance_method == 'equal':
-        # Sample equally from each population
-        weights = {label: 1.0 for label in pop_counts.keys()}
-    elif balance_method == 'proportional':
-        # Sample proportionally (no balancing)
-        weights = {label: float(count) for label, count in pop_counts.items()}
-    else:
-        raise ValueError(f"Unknown balance_method: {balance_method}")
-
-    # Normalize weights to sum to 1
-    total_weight = sum(weights.values())
-    weights = {label: w / total_weight for label, w in weights.items()}
-
-    # Compute target samples per population
-    target_per_pop = {}
-    for label, weight in weights.items():
-        n_target = int(weight * target_samples)
-        # Ensure minimum samples for gated populations (not ungated)
-        if label != -1:  # -1 is ungated
-            n_target = max(n_target, min_samples_per_gate)
-        # Don't sample more than available
-        n_target = min(n_target, pop_counts[label])
-        target_per_pop[label] = n_target
-
-    # Sample from each population
-    sampled_data_list = []
-    sample_counts = {}
-
-    for label, n_target in target_per_pop.items():
-        pop_data = data[labels == label]
-        if n_target > 0 and len(pop_data) > 0:
-            if n_target >= len(pop_data):
-                # Take all points
-                sampled = pop_data
-            else:
-                # Random sample
-                indices = rng.choice(len(pop_data), n_target, replace=False)
-                sampled = pop_data[indices]
-
-            sampled_data_list.append(sampled)
-            pop_name = label_map.get(label, 'Ungated')
-            sample_counts[pop_name] = len(sampled)
-
-    # Concatenate all samples
-    sampled_data = np.concatenate(sampled_data_list, axis=0)
-
-    # Shuffle the combined dataset
-    shuffle_indices = rng.permutation(len(sampled_data))
-    sampled_data = sampled_data[shuffle_indices]
-
-    print("  Stratified sampling results:")
-    print(f"    Final sample size: {len(sampled_data):,}")
-    for pop_name, count in sample_counts.items():
-        print(f"    {pop_name}: {count:,} ({count/len(sampled_data)*100:.1f}%)")
-
-    return sampled_data, sample_counts
-
-
-def get_default_balance_method(channel: str) -> str:
-    """
-    Get the default balance method for a channel based on typical data characteristics.
-
-    Parameters
-    ----------
-    channel : str
-        Channel name (RET, WDF, WNR, PLTF)
-
-    Returns
-    -------
-    balance_method : str
-        Recommended balance method for this channel
-    """
-    # Channels with very rare populations benefit from more aggressive balancing
-    rare_population_channels = ['RET', 'WNR']  # Reticulocytes and nucleated RBCs are rare
-
-    if channel in rare_population_channels:
-        return 'sqrt'  # Balanced sampling
-    else:
-        return 'sqrt'  # Default to sqrt for all channels
-
-
-def get_default_min_samples_per_gate(channel: str) -> int:
-    """
-    Get the default minimum samples per gate for a channel.
-
-    Parameters
-    ----------
-    channel : str
-        Channel name (RET, WDF, WNR, PLTF)
-
-    Returns
-    -------
-    min_samples : int
-        Minimum samples to ensure from each gated population
-    """
-    # Ensure at least this many samples from each rare population
-    return 50_000
 
 
 def initialize_gmm_means_from_gates(

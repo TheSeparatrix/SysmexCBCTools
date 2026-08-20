@@ -19,7 +19,7 @@ from .sysmex_channels_discrete_columns_Cambr import (
     RET_measurements,
     WPC_measurements,
 )
-from .utils import chunked_correlation, get_drop_cols, log_memory_usage
+from .utils import get_drop_cols, log_memory_usage, sampled_correlation
 
 
 def remove_duplicate_rows(df, logger):
@@ -512,7 +512,7 @@ def analyze_correlations(df, logger, output_dir, dataset_name: str = "", save_fi
 
     # Use chunked correlation calculation for large datasets
     try:
-        correlation_matrix = chunked_correlation(df, logger=logger)
+        correlation_matrix = sampled_correlation(df, logger=logger)
     except Exception as e:
         logger.error(f"Error in correlation calculation: {e}")
         logger.info("Skipping correlation analysis due to memory constraints")

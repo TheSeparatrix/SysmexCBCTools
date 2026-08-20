@@ -52,7 +52,6 @@ transfer = [
     "matplotlib>=3.3.0",
     "joblib>=1.0.0",
     "POT>=0.8.0",
-    "flowio>=1.0.0",
 ]
 
 correction = [
@@ -89,7 +88,6 @@ dev = [
 ]
 
 memory = [
-    "dask[dataframe]>=2021.3.0",
     "pyarrow>=3.0.0",
 ]
 
@@ -102,7 +100,7 @@ Repository = "https://github.com/danielkreuter/SysmexCBCTools"
 packages = {find = {}}
 
 [tool.setuptools.package-data]
-sysmexcbctools = ["**/*.yaml", "**/*.yml"]
+sysmexcbctools = ["**/*.yaml", "**/*.yml", "**/*.json"]
 
 [tool.ruff]
 line-length = 100

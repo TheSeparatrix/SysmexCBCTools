@@ -1,5 +1,6 @@
 import numpy as np
 from joblib import Parallel, delayed
+from scipy.stats import median_abs_deviation
 from sklearn.mixture import GaussianMixture
 from tqdm import tqdm
 
@@ -20,14 +21,8 @@ def transform_nonnormal(
     return (X - median_source) / mad_source * mad_target + median_target
 
 
-def mad_score(x: np.ndarray) -> np.ndarray:
-    median = np.median(x)
-    mad_value = mad(x)
-    return (x - median) / mad_value
-
-
 def mad(x: np.ndarray) -> float:
-    return np.median(np.abs(x - np.median(x)))
+    return float(median_abs_deviation(x, scale=1.0))
 
 
 def sample_impedance_array(args, impedance_data, random_state=None):

@@ -25,17 +25,22 @@ For production or clinical use, consider:
 
 ## File Formats
 
-Gates are available in two formats:
+Gates are stored as JSON:
 
-### Pickle Format (Recommended)
-- `{CHANNEL}_gates.pkl` - FlowGate objects with full metadata
-- Contains: RET_gates.pkl, WDF_gates.pkl, WNR_gates.pkl, PLTF_gates.pkl
-- Includes channel names and path vertices
+- `json_gates/{CHANNEL}_gates.json` - polygon vertices per population
+- Contains: RET, WDF, WNR and PLTF gates
+- Lightweight, human-readable and diffable
+- Converted to `FlowGate` objects on load, with channel coordinate names
+  supplied by `load_gates(gate_file, channel)`
 
-### JSON Format (Alternative)
-- `json_gates/{CHANNEL}_gates.json` - Simple coordinate lists
-- Lightweight and human-readable
-- Automatically converted to FlowGate objects when loaded
+To re-derive gates by hand, use the interactive drawing tool:
+
+```python
+from sysmexcbctools.transfer.sysmexalign import create_interactive_gating_interface
+
+layout, fs = create_interactive_gating_interface()
+layout  # draw polygons, then Save writes the JSON read back by load_gates()
+```
 
 ## Usage
 
@@ -53,7 +58,7 @@ transformer = FlowTransformer(
 # Or specify a custom gate file
 transformer = FlowTransformer(
     channel='RET',
-    gate_file='path/to/custom_gates.pkl'
+    gate_file='path/to/custom_gates.json'
 )
 ```
 

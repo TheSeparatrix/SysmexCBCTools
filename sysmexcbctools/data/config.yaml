@@ -26,6 +26,3 @@ processing:
   # Memory optimization settings
   use_memory_optimized: true # Use memory-optimized processing for large datasets (recommended for >100k rows)
   enable_memory_monitoring: true # Log memory usage throughout processing
-  correlation_sample_size: 50000 # Maximum rows to use for correlation analysis (reduces memory usage)
-  chunk_size: 1000 # Number of sample IDs to process at once in chunked operations
-  force_dask: false # Force use of Dask for multiple measurements processing (for testing, not recommended for production)

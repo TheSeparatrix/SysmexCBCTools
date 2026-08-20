@@ -4,10 +4,8 @@ import warnings
 from datetime import datetime
 from typing import List, Optional
 
-import flowio
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
 
 from ..utils.data_loader import DataLoader
 
@@ -274,123 +272,6 @@ def parse_sysmex_raw_filename(filename):
     }
 
 
-def make_fsc_from_raw_sct(filename: str, save_path: str, analyser_id: str):
-    current_file = pd.read_csv(filename)
-    date = get_datetime(filename)
-    sample_number = get_sample_number(filename)
-    # sysmex channel name is the first part of the filename (after the last / and before the first _)
-    sysmex_channel = get_sysmex_channel_name(filename)
-
-    channel_names = get_channel_names_from_sysmex_channel(sysmex_channel)
-
-    df = current_file[channel_names]
-
-    # delete all rows with 0 in any column or with the maximum of the df in any column
-    df = df[(df != 0).all(1)]
-    max_value = df.max().max()
-    df = df[(df != max_value).all(1)]
-
-    data_set = (
-        np.vstack(
-            [
-                df.values,
-            ]
-        )
-        .flatten()
-        .tolist()
-    )
-
-    metadata = {
-        "Analyser": analyser_id,
-        "Date": date,
-        "Filename": filename,
-        "Channel": sysmex_channel,
-        "SampleNumber": sample_number,
-    }
-
-    fh = open(save_path, "wb")
-    flowio.create_fcs(fh, data_set, channel_names, metadata_dict=metadata)
-    fh.close()
-
-
-def get_data_paths(
-    haas_output_path: str, qc_only: bool = True, remove_endbracket_samples: bool = True
-):
-    data_paths = {}
-    # get impedance
-    dist_folders = crawl_subfolders_for_foldername(haas_output_path, "DIST")
-    imp_rbc_files = get_filepaths_from_filestart(dist_folders, "RBC")
-    imp_plt_files = get_filepaths_from_filestart(dist_folders, "PLT")
-
-    # get SCT
-    sct_folders = crawl_subfolders_for_foldername(haas_output_path, "SCT")
-    sct_ret = get_filepaths_from_filestart(sct_folders, "RET")
-    sct_pltf = get_filepaths_from_filestart(sct_folders, "PLTF")
-    sct_wdf = get_filepaths_from_filestart(sct_folders, "WDF")
-    sct_wnr = get_filepaths_from_filestart(sct_folders, "WNR")
-
-    if qc_only:
-        imp_rbc_files = [f for f in imp_rbc_files if "QC" in f]
-        if len(imp_rbc_files) == 0:
-            raise ValueError("No QC files found in impedance RBC data")
-        imp_plt_files = [f for f in imp_plt_files if "QC" in f]
-        sct_ret = [f for f in sct_ret if "QC" in f]
-        sct_pltf = [f for f in sct_pltf if "QC" in f]
-        sct_wdf = [f for f in sct_wdf if "QC" in f]
-        sct_wnr = [f for f in sct_wnr if "QC" in f]
-
-    if remove_endbracket_samples:
-        imp_rbc_files = [f for f in imp_rbc_files if not f.endswith(").csv")]
-        imp_plt_files = [f for f in imp_plt_files if not f.endswith(").csv")]
-        sct_ret = [f for f in sct_ret if not f.endswith(").csv")]
-        sct_pltf = [f for f in sct_pltf if not f.endswith(").csv")]
-        sct_wdf = [f for f in sct_wdf if not f.endswith(").csv")]
-        sct_wnr = [f for f in sct_wnr if not f.endswith(").csv")]
-
-    data_paths["imp_rbc"] = imp_rbc_files
-    data_paths["imp_plt"] = imp_plt_files
-    data_paths["sct_ret"] = sct_ret
-    data_paths["sct_pltf"] = sct_pltf
-    data_paths["sct_wdf"] = sct_wdf
-    data_paths["sct_wnr"] = sct_wnr
-    return data_paths
-
-
-def load_saved_data(file_path: str):
-    # get sample number from file name as the string between "[" and "]"
-    sample_number = re.search(r"\[(.*?)\]", file_path).group(1)
-    # get datetime as value after second last "_" and before file extension (".npy")
-    datetime = re.search(r"\d{8}_\d{6}", file_path).group(0)
-    data = np.load(file_path)
-    sysmex_channel = get_sysmex_channel_name(file_path)
-    channel_names = get_channel_names_from_sysmex_channel(sysmex_channel)
-    return data, sample_number, datetime, sysmex_channel, channel_names
-
-
-def process_and_save_data(data_paths: dict, output_dir: str):
-    processor_map = {
-        "imp_rbc": preprocess_impedence,
-        "imp_plt": preprocess_impedence,
-        "sct_ret": preprocess_sct_ret,
-        "sct_pltf": preprocess_sct_pltf,
-        "sct_wdf": preprocess_sct_wdf,
-        "sct_wnr": preprocess_sct_wnr,
-    }
-
-    for key, processor in processor_map.items():
-        print(f"Processing {key} data...")
-        if key not in data_paths:
-            continue
-        for file_path in tqdm(data_paths[key]):
-            data = processor(file_path)
-            sample_number = get_sample_number(file_path)
-            date_time = get_datetime(file_path)
-            output_file = os.path.join(
-                output_dir, f"{key}_[{sample_number}]_{date_time}.npy"
-            )
-            np.save(output_file, data)
-
-
 def preprocess_impedence(file_path: str):
     # Merge with overflow files first, then preprocess
     data = merge_csv_with_overflows(file_path)
@@ -457,88 +338,6 @@ def preprocess_sct_wpc(file_path: str):
     # data = data[(data != 0).all(1)]
     # data = data[(data != 255).all(1)]
     return data.values
-
-
-def crawl_subfolders_for_foldername(root_folder: str, folder_name: str):
-    """Search for folders with a specific name within a root directory and its subdirectories.
-
-    This function performs a recursive search through a directory tree starting from the
-    root_folder and finds all occurrences of folders matching the specified folder_name.
-
-    Args:
-        root_folder (str): The path to the root directory where the search begins.
-        folder_name (str): The name of the folder to search for.
-
-    Returns:
-        list: A list of full paths to all matching folders found.
-
-    Example:
-        >>> crawl_subfolders_for_foldername('/path/to/root', 'target_folder')
-        ['/path/to/root/dir1/target_folder', '/path/to/root/dir2/target_folder']
-    """
-    subfolders = []
-    for root, dirs, files in os.walk(root_folder):
-        if folder_name in dirs:
-            subfolders.append(os.path.join(root, folder_name))
-    return subfolders
-
-
-def get_filepaths_from_filestart(path: str, filestart: str):
-    """Return a list of full file paths from multiple directories that match a given file prefix.
-
-    This function searches through multiple directories for files with names starting with
-    a specified prefix and returns their complete paths.
-
-    Args:
-        path (str): A list of directory paths to search in
-        filestart (str): The prefix to match file names against
-
-    Returns:
-        list: A list of full file paths for all matching files across all directories
-
-    Example:
-        >>> paths = ['/home/data1', '/home/data2']
-        >>> get_filepaths_from_filestart(paths, 'test_')
-        ['/home/data1/test_1.txt', '/home/data2/test_2.txt']
-    """
-    file_list = []
-    for folder in path:
-        file_list += [
-            os.path.join(folder, f)
-            for f in os.listdir(folder)
-            if f.startswith(filestart)
-        ]
-    return file_list
-
-
-def get_sample_number(file_name: str):
-    # Pattern handles overflow files like .116(1).csv
-    pattern = r"(\S+)\]\.116(?:\(\d+\))?\.csv$"
-    try:
-        sample_number = re.search(pattern, file_name).group(1)
-    except AttributeError:
-        print(f"Error extracting sample number from {file_name}")
-        sample_number = None
-    return sample_number
-
-
-def get_datetime(file_name: str):
-    matches = re.findall(r"\[(.*?)\]", file_name)
-    if len(matches) >= 2:
-        date_time = matches[-2]  # Penultimate match
-    else:
-        date_time = None
-    return date_time
-
-
-def get_sysmex_channel_name(filepath):
-    # Get the filename from the full path by splitting on '/' and taking the last part
-    filename = filepath.split("/")[-1]
-
-    # Split on underscore and take the first part
-    base_name = filename.split("_")[0]
-
-    return base_name
 
 
 def get_channel_names_from_sysmex_channel(sysmex_channel: str):

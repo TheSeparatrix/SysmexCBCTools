@@ -5,8 +5,7 @@ Utility functions for GAM-based correction.
 import contextlib
 
 import joblib
-import numpy as np
-import pandas as pd
+from scipy.stats import median_abs_deviation
 
 
 def mad(x):
@@ -27,15 +26,12 @@ def mad(x):
     --------
     >>> import pandas as pd
     >>> data = pd.Series([1, 2, 3, 4, 5, 100])
-    >>> mad(data)
+    >>> float(mad(data))
     1.5
     """
-    if isinstance(x, pd.Series):
-        return (x - x.median()).abs().median()
-    else:
-        x = np.asarray(x)
-        median = np.median(x)
-        return np.median(np.abs(x - median))
+    # nan_policy="omit" matches pandas' skipna default, which the previous
+    # Series implementation relied on.
+    return median_abs_deviation(x, scale=1.0, nan_policy="omit")
 
 
 def centralise(df, x, threshold=3.5):

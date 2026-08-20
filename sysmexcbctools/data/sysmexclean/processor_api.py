@@ -76,12 +76,6 @@ class XNSampleProcessor:
         Use memory-optimized processing for large datasets (>100k rows).
     enable_memory_monitoring : bool, default=True
         Log memory usage throughout processing.
-    correlation_sample_size : int, default=50000
-        Maximum rows to use for correlation analysis (reduces memory usage).
-    chunk_size : int, default=1000
-        Number of sample IDs to process at once in chunked operations.
-    force_dask : bool, default=False
-        Force use of Dask for multiple measurements processing (for testing).
     output_dir : str, default="./output"
         Directory for output files.
     output_prefix : str, default="XN_SAMPLE_processed"
@@ -146,9 +140,6 @@ class XNSampleProcessor:
         make_dummy_marks: bool = False,
         use_memory_optimized: bool = True,
         enable_memory_monitoring: bool = True,
-        correlation_sample_size: int = 50000,
-        chunk_size: int = 1000,
-        force_dask: bool = False,
         output_dir: str = "./output",
         output_prefix: str = "XN_SAMPLE_processed",
         log_to_file: bool = False,
@@ -156,54 +147,34 @@ class XNSampleProcessor:
     ):
         """Initialize the XNSampleProcessor with processing parameters."""
 
-        # If config file provided, load it and override defaults
+        processing_params = {
+            "remove_clotintube": remove_clotintube,
+            "remove_multimeasurementsamples": remove_multimeasurementsamples,
+            "remove_correlated": remove_correlated,
+            "std_threshold": std_threshold,
+            "keep_drop_rows": keep_drop_rows,
+            "make_dummy_marks": make_dummy_marks,
+            "use_memory_optimized": use_memory_optimized,
+            "enable_memory_monitoring": enable_memory_monitoring,
+        }
+
+        # A config file, when given, overrides the keyword defaults.
         if config_path is not None:
             self.config = load_config(config_path)
             self.config_path = config_path
-
-            # Extract processing parameters from config
             proc = self.config.get("processing", {})
-            self.remove_clotintube = proc.get("remove_clotintube", remove_clotintube)
-            self.remove_multimeasurementsamples = proc.get(
-                "remove_multimeasurementsamples", remove_multimeasurementsamples
-            )
-            self.remove_correlated = proc.get("remove_correlated", remove_correlated)
-            self.std_threshold = proc.get("std_threshold", std_threshold)
-            self.keep_drop_rows = proc.get("keep_drop_rows", keep_drop_rows)
-            self.make_dummy_marks = proc.get("make_dummy_marks", make_dummy_marks)
-            self.use_memory_optimized = proc.get(
-                "use_memory_optimized", use_memory_optimized
-            )
-            self.enable_memory_monitoring = proc.get(
-                "enable_memory_monitoring", enable_memory_monitoring
-            )
-            self.correlation_sample_size = proc.get(
-                "correlation_sample_size", correlation_sample_size
-            )
-            self.chunk_size = proc.get("chunk_size", chunk_size)
-            self.force_dask = proc.get("force_dask", force_dask)
-
-            # Extract output parameters from config
             out = self.config.get("output", {})
             self.output_dir = out.get("directory", output_dir)
             self.output_prefix = out.get("filename_prefix", output_prefix)
         else:
-            # Use provided parameters
             self.config = None
             self.config_path = None
-            self.remove_clotintube = remove_clotintube
-            self.remove_multimeasurementsamples = remove_multimeasurementsamples
-            self.remove_correlated = remove_correlated
-            self.std_threshold = std_threshold
-            self.keep_drop_rows = keep_drop_rows
-            self.make_dummy_marks = make_dummy_marks
-            self.use_memory_optimized = use_memory_optimized
-            self.enable_memory_monitoring = enable_memory_monitoring
-            self.correlation_sample_size = correlation_sample_size
-            self.chunk_size = chunk_size
-            self.force_dask = force_dask
+            proc = {}
             self.output_dir = output_dir
             self.output_prefix = output_prefix
+
+        for name, default in processing_params.items():
+            setattr(self, name, proc.get(name, default))
 
         self.log_to_file = log_to_file
         self.verbose = verbose
@@ -759,8 +730,7 @@ class XNSampleProcessor:
         if self.remove_multimeasurementsamples:
             if self.use_memory_optimized:
                 df, odd_samples_df, one_different_df = handle_multiple_measurements_optimized(
-                    df, self.logger, self.std_threshold,
-                    self.keep_drop_rows, use_dask=self.force_dask
+                    df, self.logger, self.std_threshold, self.keep_drop_rows
                 )
             else:
                 df, odd_samples_df, one_different_df = handle_multiple_measurements(

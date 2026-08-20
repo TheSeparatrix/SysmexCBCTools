@@ -9,7 +9,6 @@ __version__ = "0.1.0"
 from .model import DisAE
 from .networks import Decoder, DSNFeaturizer, MultiTaskClassifier
 from .training import EarlyStopping
-from .utils import denormalize_data, normalize_data
 
 __all__ = [
     'DisAE',
@@ -17,6 +16,4 @@ __all__ = [
     'Decoder',
     'MultiTaskClassifier',
     'EarlyStopping',
-    'normalize_data',
-    'denormalize_data',
 ]

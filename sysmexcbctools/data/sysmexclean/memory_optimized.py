@@ -1,37 +1,21 @@
 """
-Memory-optimized processing functions for large datasets using Dask.
+Chunked processing functions for handling multiple measurements in large datasets.
 """
 import logging
 
 import pandas as pd
 from tqdm import tqdm
 
-try:
-    import dask
-    import dask.dataframe as dd
-    from dask.distributed import Client, as_completed
-    DASK_AVAILABLE = True
-except ImportError:
-    DASK_AVAILABLE = False
-
 from .constants import STANDARD_FBC_DECRYPT
 from .utils import get_drop_cols, log_memory_usage
 
 
-def handle_multiple_measurements_optimized(df, logger, std_threshold=1.0, keep_drop_rows=False, use_dask=None):
+def handle_multiple_measurements_optimized(df, logger, std_threshold=1.0, keep_drop_rows=False):
     """
-    Memory-optimized version of handle_multiple_measurements using Dask when available.
-    Falls back to chunked pandas processing if Dask is not available.
+    Consolidate samples measured more than once, processing sample IDs in chunks
+    to keep peak memory bounded.
     """
     logger.info("Handling samples with multiple measurements (memory-optimized)")
-
-    # Auto-detect whether to use Dask based on dataset size and availability
-    if use_dask is None:
-        use_dask = DASK_AVAILABLE and (df.shape[0] > 100000 or df.shape[1] > 200)
-
-    if use_dask and not DASK_AVAILABLE:
-        logger.warning("Dask not available, falling back to chunked pandas processing")
-        use_dask = False
 
     log_memory_usage(logger, "Before multiple measurements processing")
 
@@ -58,102 +42,9 @@ def handle_multiple_measurements_optimized(df, logger, std_threshold=1.0, keep_d
         if fbc_measurement in df.columns
     }
 
-    if use_dask:
-        return _handle_multiple_measurements_dask(
-            df, logger, std_threshold, keep_drop_rows, stds, initial_len
-        )
-    else:
-        return _handle_multiple_measurements_chunked(
-            df, logger, std_threshold, keep_drop_rows, stds, initial_len
-        )
-
-
-def _handle_multiple_measurements_dask(df, logger, std_threshold, keep_drop_rows, stds, initial_len):
-    """Handle multiple measurements using Dask for memory efficiency."""
-    logger.info("Using Dask for multiple measurements processing")
-
-    # Convert to Dask DataFrame with appropriate partitioning
-    # Partition by number of unique samples to keep related samples together
-    n_unique_samples = df["Sample No."].nunique()
-    n_partitions = min(max(n_unique_samples // 10000, 1), 100)  # 1-100 partitions
-
-    ddf = dd.from_pandas(df, npartitions=n_partitions)
-
-    def process_group_pandas(group_df):
-        """Process groups using pandas to avoid Dask apply warnings."""
-        kept_samples = []
-        odd_samples = []
-
-        # Try to use include_groups parameter if available, otherwise fall back
-        try:
-            # Try newer pandas syntax (2.0+)
-            groupby_obj = group_df.groupby("Sample No.", include_groups=False)
-            use_include_groups = True
-        except TypeError:
-            # Fall back to older pandas syntax
-            groupby_obj = group_df.groupby("Sample No.")
-            use_include_groups = False
-
-        for sample_id, group in groupby_obj:
-            if use_include_groups:
-                # Add the Sample No. back since include_groups=False excludes it
-                group = group.copy()
-                group['Sample No.'] = sample_id
-            # If not using include_groups, group already contains Sample No. column
-
-            if len(group) < 2:
-                kept_samples.append(group)
-                continue
-
-            # Sort by date and time
-            group = group.sort_values(["Date", "Time"], ascending=True)
-
-            # Check difference for each standard FBC measurement
-            check_list = []
-            for fbc_measurement in STANDARD_FBC_DECRYPT:
-                if fbc_measurement not in group.columns:
-                    continue
-
-                difference = abs(
-                    group.iloc[0][fbc_measurement] - group.iloc[1][fbc_measurement]
-                )
-                check = ~(difference > std_threshold * stds[fbc_measurement])
-                check_list.append(check)
-
-            # Keep measurement if all checks were true or at most one failed
-            if sum(check_list) >= len(check_list) - 1:
-                kept_samples.append(group.iloc[:1])
-            else:
-                odd_samples.append(group)
-
-        return kept_samples, odd_samples
-
-    # Convert back to pandas for processing to avoid apply warnings
-    df_pandas = ddf.compute()
-    kept_samples_list, odd_samples_list = process_group_pandas(df_pandas)
-
-    # Concatenate results
-    if kept_samples_list:
-        df_result = pd.concat(kept_samples_list, ignore_index=True)
-    else:
-        df_result = pd.DataFrame()
-
-    if odd_samples_list:
-        many_samples_df = pd.concat(odd_samples_list, ignore_index=True)
-    else:
-        many_samples_df = pd.DataFrame()
-
-    only_one_different_df = pd.DataFrame()  # Not implemented in this version
-
-    log_memory_usage(logger, "After Dask multiple measurements processing")
-
-    rows_dropped = initial_len - len(df_result)
-    logger.info(
-        f"Dropped {rows_dropped} identical sample number rows ({rows_dropped/initial_len:.2%}), "
-        f"keeping the one with the earliest date and time if samples matched within {std_threshold} stds"
+    return _handle_multiple_measurements_chunked(
+        df, logger, std_threshold, keep_drop_rows, stds, initial_len
     )
-
-    return df_result, many_samples_df, only_one_different_df
 
 
 def _handle_multiple_measurements_chunked(df, logger, std_threshold, keep_drop_rows, stds, initial_len):
@@ -276,9 +167,3 @@ def _handle_multiple_measurements_chunked(df, logger, std_threshold, keep_drop_r
     return df_result, many_samples_df, only_one_different_df
 
 
-def count_rows_dropped(df, initial_len, drop_col, keep_drop_rows):
-    """Count rows that would be dropped."""
-    if keep_drop_rows and drop_col in df.columns:
-        return df[drop_col].sum()
-    else:
-        return initial_len - len(df)

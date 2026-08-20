@@ -44,50 +44,6 @@ xn_transformer.fit(source_df, target_df)
 transformed_df = xn_transformer.transform(source_df)
 ```
 
-### Command Line Interface (CLI)
-
-Edit `config/data_paths.yaml` to point to your dataset locations, then:
-
-**Flow cytometry transformation** (GMM + Optimal Transport):
-```bash
-# Compute transformation models
-python compute_transformation.py \
-  --source-dataset strides_merged \
-  --target-dataset interval_36 \
-  --channel RET \
-  --source-samples strides \
-  --target-samples interval_baseline_36
-
-# Apply transformations
-python transform.py \
-  --source-dataset strides_merged \
-  --output-dataset strides_transformed_to_interval36 \
-  --channel RET \
-  --transformation strides_to_interval36 \
-  --samples strides
-```
-
-**Impedance data transformation** (MAD/median-based):
-```bash
-python transform_impedance.py \
-  --source-dataset strides \
-  --target-dataset interval_36 \
-  --output-dataset strides_impedance_transformed \
-  --source-samples strides \
-  --target-samples interval_baseline_36 \
-  --n_jobs 30
-```
-
-**XN_SAMPLE tabular data transformation**:
-```bash
-python transform_xnsample.py \
-  --source-dataset strides_xn_sample \
-  --target-dataset interval_36_xn_sample \
-  --output-dataset strides_xn_sample_transformed \
-  --source-samples strides \
-  --target-samples interval_baseline_36
-```
-
 ## API Documentation
 
 ### FlowTransformer
@@ -345,15 +301,6 @@ files:
   centile_samples:
     strides: "${base_paths.rds_base}/samples/strides_samples.npy"
     interval_baseline_36: "${base_paths.rds_base}/samples/interval_36_samples.npy"
-```
-
-### Legacy Interface (Backward Compatibility)
-
-Original path-based commands are still supported:
-```bash
-python compute_transformation.py <source_dir> <target_dir> <output_dir> \
-  "<source_name>" "<target_name>" "<channel>" \
-  --sample_nos_source=<source.npy> --sample_nos_target=<target.npy>
 ```
 
 ## Architecture

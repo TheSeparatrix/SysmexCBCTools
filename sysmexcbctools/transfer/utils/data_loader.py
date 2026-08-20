@@ -11,22 +11,20 @@ import numpy as np
 import pandas as pd
 
 # Import the configuration loader
-from ..config.config_loader import get_config_loader
+from ..config.config_loader import ConfigLoader
 
 
 class DataLoader:
     """Data loader with configuration-based path resolution."""
 
-    def __init__(self, config_file: str = "config/data_paths.yaml",
-                 environment: str = "production"):
+    def __init__(self, config_file: str = "config/data_paths.yaml"):
         """
         Initialise the data loader.
-        
+
         Args:
             config_file: Path to configuration file
-            environment: Environment to use
         """
-        self.config = get_config_loader(config_file, environment)
+        self.config = ConfigLoader(config_file)
 
     def load_numpy_file(self, file_category: str, file_name: str,
                        allow_pickle: bool = True) -> np.ndarray:

@@ -626,29 +626,9 @@ class FlowTransformer:
         if not self.is_fitted_:
             raise RuntimeError("Cannot save unfitted transformer. Call fit() first.")
 
-        state = {
-            "channel": self.channel,
-            "n_components": self.n_components,
-            "covariance_type": self.covariance_type,
-            "transport_method": self.transport_method,
-            "max_samples": self.max_samples,
-            "preserve_rare": self.preserve_rare,
-            "rare_threshold": self.rare_threshold,
-            "omega_threshold": self.omega_threshold,
-            "n_jobs": self.n_jobs,
-            "random_state": self.random_state,
-            "use_gate_init": self.use_gate_init,
-            "gate_file": self.gate_file,
-            "gate_init_method": self.gate_init_method,
-            "use_cascade_init": self.use_cascade_init,
-            "source_gmm": self.source_gmm_,
-            "target_gmm": self.target_gmm_,
-            "transport_dict": self.transport_dict_,
-        }
-
         os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
         with open(filepath, "wb") as f:
-            pickle.dump(state, f)
+            pickle.dump(self, f)
         print(f"Saved transformer to {filepath}")
 
     @classmethod
@@ -667,29 +647,10 @@ class FlowTransformer:
             Loaded transformer.
         """
         with open(filepath, "rb") as f:
-            state = pickle.load(f)
+            transformer = pickle.load(f)
 
-        transformer = cls(
-            channel=state["channel"],
-            n_components=state["n_components"],
-            covariance_type=state["covariance_type"],
-            transport_method=state["transport_method"],
-            max_samples=state["max_samples"],
-            preserve_rare=state["preserve_rare"],
-            rare_threshold=state["rare_threshold"],
-            omega_threshold=state["omega_threshold"],
-            n_jobs=state["n_jobs"],
-            random_state=state["random_state"],
-            use_gate_init=state.get("use_gate_init", True),
-            gate_file=state.get("gate_file", None),
-            gate_init_method=state.get("gate_init_method", "equal"),
-            use_cascade_init=state.get("use_cascade_init", False),
-        )
-
-        transformer.source_gmm_ = state["source_gmm"]
-        transformer.target_gmm_ = state["target_gmm"]
-        transformer.transport_dict_ = state["transport_dict"]
-        transformer.is_fitted_ = True
+        if not isinstance(transformer, cls):
+            raise ValueError(f"Loaded object is not a {cls.__name__}")
 
         print(f"Loaded transformer from {filepath}")
         return transformer
@@ -1000,52 +961,45 @@ class ImpedanceTransformer:
         return source_df
 
     def save(self, filepath: str):
-        """Save the fitted transformer with GMMs and transport maps."""
+        """
+        Save the fitted transformer to a file.
+
+        Parameters
+        ----------
+        filepath : str
+            Path to save the transformer.
+        """
         if not self.is_fitted_:
             raise RuntimeError("Cannot save unfitted transformer. Call fit() first.")
 
-        state = {
-            "gmm_sample_size": self.gmm_sample_size,
-            "n_jobs": self.n_jobs,
-            "rbc_source_gmm": self.rbc_source_gmm_,
-            "rbc_target_gmm": self.rbc_target_gmm_,
-            "plt_source_gmm": self.plt_source_gmm_,
-            "plt_target_gmm": self.plt_target_gmm_,
-            "rbc_transport_dict": self.rbc_transport_dict_,
-            "plt_transport_dict": self.plt_transport_dict_,
-        }
-
         os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
         with open(filepath, "wb") as f:
-            pickle.dump(state, f)
+            pickle.dump(self, f)
         print(f"Saved transformer to {filepath}")
-        print("  Saved: 4 GMMs (RBC source/target, PLT source/target)")
-        print("  Saved: 2 transport maps (RBC, PLT)")
 
     @classmethod
     def load(cls, filepath: str):
-        """Load a fitted transformer with GMMs and transport maps."""
+        """
+        Load a fitted transformer from a file.
+
+        Parameters
+        ----------
+        filepath : str
+            Path to the saved transformer.
+
+        Returns
+        -------
+        transformer : ImpedanceTransformer
+            Loaded transformer.
+        """
         with open(filepath, "rb") as f:
-            state = pickle.load(f)
+            transformer = pickle.load(f)
 
-        transformer = cls(
-            gmm_sample_size=state["gmm_sample_size"],
-            n_jobs=state["n_jobs"],
-        )
-
-        transformer.rbc_source_gmm_ = state["rbc_source_gmm"]
-        transformer.rbc_target_gmm_ = state["rbc_target_gmm"]
-        transformer.plt_source_gmm_ = state["plt_source_gmm"]
-        transformer.plt_target_gmm_ = state["plt_target_gmm"]
-        transformer.rbc_transport_dict_ = state["rbc_transport_dict"]
-        transformer.plt_transport_dict_ = state["plt_transport_dict"]
-        transformer.is_fitted_ = True
+        if not isinstance(transformer, cls):
+            raise ValueError(f"Loaded object is not a {cls.__name__}")
 
         print(f"Loaded transformer from {filepath}")
-        print("  Loaded: 4 GMMs (RBC source/target, PLT source/target)")
-        print("  Loaded: 2 transport maps (RBC, PLT)")
         return transformer
-
 
 class XNSampleTransformer:
     """
@@ -1230,34 +1184,44 @@ class XNSampleTransformer:
         return source_df
 
     def save(self, filepath: str):
-        """Save the fitted transformer."""
+        """
+        Save the fitted transformer to a file.
+
+        Parameters
+        ----------
+        filepath : str
+            Path to save the transformer.
+        """
         if not self.is_fitted_:
             raise RuntimeError("Cannot save unfitted transformer. Call fit() first.")
 
-        state = {
-            "columns": self.columns,
-            "source_params": self.source_params_,
-            "target_params": self.target_params_,
-        }
-
         os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
         with open(filepath, "wb") as f:
-            pickle.dump(state, f)
+            pickle.dump(self, f)
         print(f"Saved transformer to {filepath}")
 
     @classmethod
     def load(cls, filepath: str):
-        """Load a fitted transformer."""
-        with open(filepath, "rb") as f:
-            state = pickle.load(f)
+        """
+        Load a fitted transformer from a file.
 
-        transformer = cls(columns=state["columns"])
-        transformer.source_params_ = state["source_params"]
-        transformer.target_params_ = state["target_params"]
-        transformer.is_fitted_ = True
+        Parameters
+        ----------
+        filepath : str
+            Path to the saved transformer.
+
+        Returns
+        -------
+        transformer : XNSampleTransformer
+            Loaded transformer.
+        """
+        with open(filepath, "rb") as f:
+            transformer = pickle.load(f)
+
+        if not isinstance(transformer, cls):
+            raise ValueError(f"Loaded object is not a {cls.__name__}")
 
         print(f"Loaded transformer from {filepath}")
         return transformer
-
 
 __all__ = ["FlowTransformer", "ImpedanceTransformer", "XNSampleTransformer"]

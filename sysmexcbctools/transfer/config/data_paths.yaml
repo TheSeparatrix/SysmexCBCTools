@@ -27,12 +27,3 @@ files:
     interval_baseline: "${base_paths.rds_project}/INTERVAL/interval_baseline_centile_samples.npy"
     interval_baseline_36: "${base_paths.rds_project}/INTERVAL/interval_baseline_centile_samples_36.npy"
     interval_baseline_41: "${base_paths.rds_project}/INTERVAL/interval_baseline_centile_samples_41.npy"
-
-# Alternative configuration for different environments
-environments:
-  production:
-    base_rds_path: "/rds/project/rds-ccRCdkyWMsY/ref"
-  development:
-    base_rds_path: "/path/to/dev/data"  # not currently used
-  local:
-    base_rds_path: "/path/to/local/data"  # not currently used

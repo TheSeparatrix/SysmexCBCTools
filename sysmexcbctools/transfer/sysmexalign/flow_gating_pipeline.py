@@ -1,5 +1,5 @@
+import json
 import os
-import pickle
 
 import ipywidgets as widgets
 import matplotlib.pyplot as plt
@@ -8,7 +8,6 @@ import pandas as pd
 from IPython.display import clear_output
 from matplotlib.path import Path
 from matplotlib.widgets import PolygonSelector
-from sklearn.mixture import GaussianMixture
 
 sysmex_channels_to_flowcyto_channels = {
     "WNR": ["SFL", "FSC", "SSC", "FSCW"],
@@ -127,15 +126,23 @@ class FlowGatingSystem:
         plt.draw()
 
     def save_gates(self, filename):
-        """Save all gates to a file"""
-        with open(filename, "wb") as f:
-            pickle.dump(self.gates, f)
+        """Save all gates as JSON, the format load_gates() reads."""
+        vertices = {
+            name: np.asarray(gate.path_vertices).tolist()
+            for name, gate in self.gates.items()
+        }
+        with open(filename, "w") as f:
+            json.dump(vertices, f)
         print(f"Saved {len(self.gates)} gates to {filename}")
 
     def load_gates(self, filename):
-        """Load gates from a file"""
-        with open(filename, "rb") as f:
-            self.gates = pickle.load(f)
+        """Load gates from a JSON file written by save_gates()."""
+        with open(filename) as f:
+            vertices = json.load(f)
+        self.gates = {
+            name: FlowGate(name, verts, self.column_names)
+            for name, verts in vertices.items()
+        }
         if self.verbose:
             print(f"Loaded {len(self.gates)} gates from {filename}")
         return self.gates
@@ -165,95 +172,6 @@ class FlowGatingSystem:
 
         # Return the gated events
         return data[mask]
-
-    def apply_all_gates(self, data=None):
-        """Apply all gates to the data and add a 'gate_label' column"""
-        if data is None:
-            data = self.data
-
-        # Create a new column filled with None
-        data = data.copy()
-        data["gate_label"] = None
-
-        # Apply each gate in order
-        for gate_name in self.gates:
-            # Get the indices of events in this gate
-            gate = self.gates[gate_name]
-            x_channel, y_channel = gate.channels
-
-            # Check if the data has the required channels
-            if x_channel not in data.columns or y_channel not in data.columns:
-                print(
-                    f"Skipping gate '{gate_name}'. Data missing required channels: {x_channel}, {y_channel}"
-                )
-                continue
-
-            # Get points
-            points = data[[x_channel, y_channel]].values
-
-            # Find points in the gate that don't already have a label
-            mask = gate.contains_points(points) & (data["gate_label"].isna())
-
-            # Label these points
-            data.loc[mask, "gate_label"] = gate_name
-
-        return data
-
-    def fit_gaussian_to_gate(self, gate_name, data=None):
-        """Fit a Gaussian mixture model to the gated events"""
-        if data is None:
-            data = self.data
-
-        # Get the gated events
-        gated_data = self.apply_gate(gate_name, data)
-
-        # points = gated_data[[x_channel, y_channel]].values
-        points = gated_data[self.column_names].values
-        # remove any rows containing 0 or 255 for fitting
-        points = points[(points != 0).all(axis=1) & (points != 255).all(axis=1)]
-
-        if gated_data is None or len(points) < 10:
-            print(f"No events found in gate '{gate_name}'")
-            return {
-                "mean": [-1] * len(self.column_names),
-                "covariance": -1 * np.eye(len(self.column_names)),
-                "count": 0,
-            }
-
-        # Fit a Gaussian model
-        # gate = self.gates[gate_name]
-        # x_channel, y_channel = gate.channels
-
-        # set any NaN values to 0
-        points = np.nan_to_num(points)
-        gmm = GaussianMixture(n_components=1, covariance_type="full")
-        try:
-            gmm.fit(points)
-        except Exception as e:
-            print(f"Error fitting Gaussian to gate '{gate_name}': {e}")
-            print(gated_data)
-        # Extract parameters
-        params = {
-            "mean": gmm.means_[0],
-            "covariance": gmm.covariances_[0],
-            "count": len(gated_data),
-        }
-
-        return params
-
-    def fit_gaussians_to_all_gates(self, data=None):
-        """Fit Gaussian models to all gates"""
-        if data is None:
-            data = self.data
-
-        results = {}
-
-        for gate_name in self.gates:
-            params = self.fit_gaussian_to_gate(gate_name, data)
-            if params is not None:
-                results[gate_name] = params
-
-        return results
 
     def show_gates(self, x_channel=None, y_channel=None, data=None, sample_size=10000):
         """Show all gates on a scatter plot"""
@@ -477,70 +395,3 @@ def create_interactive_gating_interface():
 
     return layout, fs
 
-
-# Function to perform batch processing on multiple samples using saved gates
-def process_samples(
-    gating_system, sample_files, gate_file, output_folder="results", verbose=False
-):
-    """
-    Process multiple samples using saved gates
-
-    Parameters:
-    -----------
-    gating_system : FlowGatingSystem
-        The gating system with loaded gates
-    sample_files : list
-        List of paths to sample CSV files
-    gate_file : str
-        Path to the saved gates file
-    output_folder : str
-        Folder to save results
-
-    Returns:
-    --------
-    dict
-        Dictionary of results for each sample
-    """
-    # Create output folder if it doesn't exist
-    os.makedirs(output_folder, exist_ok=True)
-
-    # Load the gates
-    gating_system.load_gates(gate_file)
-
-    # Process each sample
-    results = {}
-
-    for sample_file in sample_files:
-        sample_name = os.path.basename(sample_file).split(".")[0]
-        if verbose:
-            print(f"Processing sample: {sample_name}")
-
-        # Load the sample data
-        gating_system.load_data(sample_file)
-
-        # Apply gates and add labels
-        labeled_data = gating_system.apply_all_gates()
-
-        # Fit Gaussians to each gate
-        gaussian_params = gating_system.fit_gaussians_to_all_gates()
-
-        # # Save the labeled data
-        # labeled_data.to_csv(f"{output_folder}/{sample_name}_labeled.csv", index=False)
-
-        # # Save the Gaussian parameters
-        # with open(f"{output_folder}/{sample_name}_gaussian_params.pkl", "wb") as f:
-        #     pickle.dump(gaussian_params, f)
-
-        # Store the results
-        results[sample_name] = {
-            "labeled_data": labeled_data,
-            "gaussian_params": gaussian_params,
-            "gates": list(gating_system.gates.keys()),
-        }
-
-        if verbose:
-            print(
-                f"Processed {sample_name}: {len(labeled_data)} events, {len(gaussian_params)} gates"
-            )
-
-    return results

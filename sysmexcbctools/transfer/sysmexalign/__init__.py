@@ -49,6 +49,7 @@ from .api import FlowTransformer, ImpedanceTransformer, XNSampleTransformer
 from .flow_gating_pipeline import (
     FlowGate,
     FlowGatingSystem,
+    create_interactive_gating_interface,
 )
 from .gate_utils import (
     classify_points_by_gate,
@@ -107,6 +108,7 @@ __all__ = [
     # Flow gating pipeline
     'FlowGate',
     'FlowGatingSystem',
+    'create_interactive_gating_interface',
 ]
 
 __version__ = '0.1.0'

@@ -1,7 +1,5 @@
 import gc
-import logging
 import os
-from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -11,50 +9,6 @@ import yaml
 from tqdm import tqdm
 
 from .constants import ID_COLUMNS
-
-
-def setup_logging(config):
-    """Set up logging configuration with both file and console outputs."""
-    # Make logs directory if it doesn't exist
-    output_dir = config["output"]["directory"]
-    logdir = output_dir + "/logs"
-    if not os.path.exists(logdir):
-        os.makedirs(logdir)
-
-    # Get string of time and date for log filename
-    now = datetime.now()
-    dt_string = now.strftime("%Y%m%d_%H%M%S")
-    log_file = f"{logdir}/XN_SAMPLE_processing_{dt_string}.log"
-
-    # Get the logger
-    logger = logging.getLogger(__name__)
-    logger.setLevel(logging.DEBUG)  # Capture all levels
-
-    # Clear any existing handlers (prevents duplicate logs)
-    if logger.hasHandlers():
-        logger.handlers.clear()
-
-    # Create formatters
-    console_formatter = logging.Formatter("%(levelname)s: %(message)s")
-    file_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-
-    # Console handler (for standard output)
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)  # Less verbose for console
-    console_handler.setFormatter(console_formatter)
-
-    # File handler (more detailed logging)
-    file_handler = logging.FileHandler(log_file)
-    file_handler.setLevel(logging.DEBUG)  # More detailed for file
-    file_handler.setFormatter(file_formatter)
-
-    # Add handlers to logger
-    logger.addHandler(console_handler)
-    logger.addHandler(file_handler)
-
-    logger.info(f"Logging initialized. Detailed logs will be saved to {log_file}")
-
-    return logger
 
 
 def load_config(config_path):
@@ -296,43 +250,35 @@ def log_memory_usage(logger, step_name):
     return current
 
 
-def chunked_correlation(df, chunk_size=10000, logger=None):
+def sampled_correlation(df, logger=None):
     """
-    Calculate correlation matrix using chunked processing to handle large datasets.
-    This is memory-efficient for large dataframes.
-    """
-    if logger:
-        logger.info(f"Computing correlations in chunks of {chunk_size} rows")
+    Correlation matrix over the numeric columns.
 
-    # Get numeric columns only
+    Very large frames are sub-sampled first: a full correlation over hundreds
+    of columns and millions of rows is the peak-memory step of the pipeline.
+    """
     numeric_df = df.select_dtypes(include=[np.number])
     n_rows, n_cols = numeric_df.shape
 
     if logger:
         logger.info(f"Computing correlation matrix for {n_cols} numeric columns")
 
-    # For very large datasets, sample if needed to prevent memory issues
     if n_rows > 100000 and n_cols > 300:
         sample_size = min(50000, n_rows)
         if logger:
-            logger.warning(f"Large dataset detected ({n_rows} rows, {n_cols} cols). "
-                          f"Sampling {sample_size} rows for correlation analysis")
+            logger.warning(
+                f"Large dataset detected ({n_rows} rows, {n_cols} cols). "
+                f"Sampling {sample_size} rows for correlation analysis"
+            )
         numeric_df = numeric_df.sample(n=sample_size, random_state=42)
 
-    # Calculate correlation matrix
     try:
-        correlation_matrix = numeric_df.corr()
-        if logger:
-            logger.info(f"Successfully computed {correlation_matrix.shape[0]}x{correlation_matrix.shape[1]} correlation matrix")
-        return correlation_matrix
+        return numeric_df.corr()
     except MemoryError as e:
+        # Retry smaller rather than losing the analysis entirely.
         if logger:
             logger.error(f"Memory error during correlation calculation: {e}")
-            logger.info("Trying with smaller sample size")
-        # Fallback to smaller sample
-        sample_size = min(10000, n_rows)
-        numeric_df = numeric_df.sample(n=sample_size, random_state=42)
-        correlation_matrix = numeric_df.corr()
+        numeric_df = numeric_df.sample(n=min(10000, n_rows), random_state=42)
         if logger:
-            logger.warning(f"Computed correlation matrix using reduced sample of {sample_size} rows")
-        return correlation_matrix
+            logger.warning("Recomputed correlation matrix on a reduced sample")
+        return numeric_df.corr()

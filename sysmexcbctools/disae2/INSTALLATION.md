@@ -19,7 +19,7 @@ This installs the package in "editable" mode, allowing you to modify the code an
 
 ```bash
 cd /home/dk659/MDANN/DomainBed/disae2
-pip install -r requirements.txt
+pip install 'sysmexcbctools[disae2]'
 ```
 
 Then use the package by adding the path to your Python scripts:
@@ -97,7 +97,6 @@ disae2/
 ├── tests/               # Unit tests
 │   └── test_model.py    # Model tests
 ├── setup.py             # Package setup
-├── requirements.txt     # Dependencies
 └── README.md            # Documentation
 ```
 

@@ -6,17 +6,9 @@ maintaining backward compatibility with the original script interface.
 """
 
 import argparse
-import sys
 from datetime import datetime
-from pathlib import Path
 
-# Handle both direct execution and module import
-try:
-    from .sysmexclean import XNSampleProcessor
-except ImportError:
-    # Running as script, add parent to path
-    sys.path.insert(0, str(Path(__file__).parent))
-    from sysmexclean import XNSampleProcessor
+from .sysmexclean import XNSampleProcessor
 
 
 def main():
