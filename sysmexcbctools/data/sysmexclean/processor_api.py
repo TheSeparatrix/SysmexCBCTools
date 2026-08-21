@@ -21,12 +21,14 @@ from .processors import (
     encode_flags,
     handle_multiple_measurements,
     make_union_drop_column,
-    process_discrete_columns,
+    mask_unmeasured_channels,
+    normalize_duplicate_columns,
     process_marks,
     remove_clot_in_tube_samples,
     remove_correlated_columns,
     remove_duplicate_columns,
     remove_duplicate_rows,
+    remove_empty_columns,
     remove_redundant_columns,
     remove_technical_samples,
     remove_unused_columns,
@@ -72,6 +74,10 @@ class XNSampleProcessor:
     make_dummy_marks : bool, default=False
         If True, data mark fields (ending in "/M") are one-hot encoded
         into multiple columns.
+    drop_empty_columns : bool, default=True
+        Remove columns that are NaN for every row.  Which columns those are
+        depends on the channel mix of the cohort, so set this False when the
+        column sets of separate runs have to line up.
     use_memory_optimized : bool, default=True
         Use memory-optimized processing for large datasets (>100k rows).
     enable_memory_monitoring : bool, default=True
@@ -138,6 +144,7 @@ class XNSampleProcessor:
         std_threshold: float = 1.0,
         keep_drop_rows: bool = False,
         make_dummy_marks: bool = False,
+        drop_empty_columns: bool = True,
         use_memory_optimized: bool = True,
         enable_memory_monitoring: bool = True,
         output_dir: str = "./output",
@@ -154,6 +161,7 @@ class XNSampleProcessor:
             "std_threshold": std_threshold,
             "keep_drop_rows": keep_drop_rows,
             "make_dummy_marks": make_dummy_marks,
+            "drop_empty_columns": drop_empty_columns,
             "use_memory_optimized": use_memory_optimized,
             "enable_memory_monitoring": enable_memory_monitoring,
         }
@@ -707,14 +715,21 @@ class XNSampleProcessor:
 
         df = df.reset_index(drop=True)
 
-        # Process discrete columns
-        df = process_discrete_columns(df, self.logger)
+        # Make duplicated column labels unique, so every column-by-column
+        # step below sees a Series rather than a two-column frame.
+        df = normalize_duplicate_columns(df, self.logger)
 
         # Remove unused columns
         df = remove_unused_columns(df, self.logger)
 
         # Encode flags
         df = encode_flags(df, self.logger)
+
+        # Blank the channels the Discrete order never asked for.  Must run
+        # after encode_flags (whose 0-fill would otherwise re-fabricate the
+        # flags) and before everything below, which would otherwise compute on
+        # the analyser's zero fill.
+        df = mask_unmeasured_channels(df, self.logger)
 
         # Encode data marks
         df = process_marks(df, self.logger, self.make_dummy_marks)
@@ -766,6 +781,10 @@ class XNSampleProcessor:
 
         # Remove redundant columns
         df = remove_redundant_columns(df, self.logger)
+
+        # Drop columns left empty for every row
+        if self.drop_empty_columns:
+            df = remove_empty_columns(df, self.logger)
 
         # Convert to numeric
         df = convert_to_numeric(df, self.logger)

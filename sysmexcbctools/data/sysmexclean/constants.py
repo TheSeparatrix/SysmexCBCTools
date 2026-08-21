@@ -52,15 +52,20 @@ SYSMEX_TECHNICAL_SAMPLE_PREFIXES = [
     "OPT-AXIS",
 ]
 
-# Columns to remove from the dataset
+# Columns to remove from the dataset.
+#
+# ``Discrete`` and ``Measurement Mode`` are deliberately NOT here.  They are
+# what ``mask_unmeasured_channels`` reads to decide which measurements the
+# analyser never took, and it runs after ``remove_unused_columns``.  Keeping
+# them also makes the cleaned file self-explanatory: ``Discrete`` says which
+# channels ran, ``Measurement Mode`` says why body-fluid rows were left with
+# the analyser's own fill.  See ``discrete_channels.unmeasured_by_discrete``.
 TRASH_COLUMNS = [
     "Nickname",
     "Rack",
     "Position",
     "Sample Inf.",
     "Order Type",
-    "Measurement Mode",
-    "Discrete",
     "Patient ID",
     "Analysis Info.",
     "Judgment",

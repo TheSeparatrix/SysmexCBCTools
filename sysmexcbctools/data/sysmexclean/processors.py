@@ -1,7 +1,6 @@
 import logging
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
@@ -13,12 +12,7 @@ from .constants import (
     SYSMEX_TECHNICAL_SAMPLE_PREFIXES,
     TRASH_COLUMNS,
 )
-from .sysmex_channels_discrete_columns_Cambr import (
-    CBC_measurements,
-    DIFF_measurements,
-    RET_measurements,
-    WPC_measurements,
-)
+from .discrete_channels import mask_unmeasured
 from .utils import get_drop_cols, log_memory_usage, sampled_correlation
 
 
@@ -90,95 +84,83 @@ def remove_technical_samples(df, logger, keep_drop_rows=False):
     return df
 
 
-def process_discrete_columns(df, logger):
-    """Set measurements to NaN that are not indicated in the Discrete column."""
-    logger.info(
-        "Processing Discrete column to identify which measurements were performed"
-    )
+def normalize_duplicate_columns(df, logger):
+    """Make duplicated column labels unique by suffixing ``_1``, ``_2``, ...
 
-    # First, check for and handle duplicate column names
-    if len(df.columns) != len(set(df.columns)):
-        logger.warning("Duplicate column names detected in DataFrame")
-        # Find the duplicates
-        dupes = df.columns[df.columns.duplicated()].tolist()
-        logger.warning(f"Duplicate columns: {dupes}")
+    ``XN_SAMPLE.csv`` repeats around 30 header names.  ``pd.read_csv`` already
+    mangles those to ``X.1``, but a frame built from Parquet, from a
+    ``pd.concat``, or handed in directly can still carry genuinely duplicated
+    labels -- and ``df[col]`` then returns a two-column frame rather than a
+    Series, which breaks every column-by-column step that follows.  Run this
+    before any of them.
+    """
+    if len(df.columns) == len(set(df.columns)):
+        return df
 
-        # Create a clean DataFrame with unique column names
-        clean_columns = []
-        seen = set()
-        for col in df.columns:
-            if col in seen:
-                # Append a suffix to make it unique
-                count = 1
+    dupes = df.columns[df.columns.duplicated()].tolist()
+    logger.warning(f"Duplicate column names detected in DataFrame: {dupes}")
+
+    clean_columns = []
+    seen = set()
+    for col in df.columns:
+        if col in seen:
+            count = 1
+            new_col = f"{col}_{count}"
+            while new_col in seen:
+                count += 1
                 new_col = f"{col}_{count}"
-                while new_col in seen:
-                    count += 1
-                    new_col = f"{col}_{count}"
-                logger.warning(f"Renamed duplicate column '{col}' to '{new_col}'")
-                clean_columns.append(new_col)
-                seen.add(new_col)
-            else:
-                clean_columns.append(col)
-                seen.add(col)
+            logger.warning(f"Renamed duplicate column '{col}' to '{new_col}'")
+            clean_columns.append(new_col)
+            seen.add(new_col)
+        else:
+            clean_columns.append(col)
+            seen.add(col)
 
-        # Assign unique column names
-        df.columns = clean_columns
+    df.columns = clean_columns
+    return df
 
-    # Create helper columns for each discrete entry possibility
-    df["discrete_freeselect"] = df["Discrete"].str.contains("FREE SELECT", na=False)
-    df["discrete_cbc"] = df["Discrete"].str.contains("CBC", na=False)
-    df["discrete_diff"] = df["Discrete"].str.contains("DIFF", na=False)
-    df["discrete_ret"] = df["Discrete"].str.contains("RET", na=False)
-    df["discrete_pltf"] = df["Discrete"].str.contains("PLT-F", na=False)
-    df["discrete_wpc"] = df["Discrete"].str.contains("WPC", na=False)
 
-    # Filter the measurement lists to include only columns that exist in the DataFrame
-    cbc_cols = [col for col in CBC_measurements if col in df.columns]
-    diff_cols = [col for col in DIFF_measurements if col in df.columns]
-    ret_cols = [col for col in RET_measurements if col in df.columns]
-    wpc_cols = [col for col in WPC_measurements if col in df.columns]
+def mask_unmeasured_channels(df, logger):
+    """Set to NaN the measurements the ``Discrete`` order never asked for.
 
-    logger.debug(
-        f"Setting values to NaN for {len(cbc_cols)} CBC measurements if not performed"
+    The analyser zero-fills the fields of every channel it did not run, so a
+    ``CBC+DIFF`` sample is exported with ``RET%(%) = 0.00`` -- a measurement of
+    zero rather than "not measured".  Some fields are not even zero but a
+    constant artefact of computing on zeros (``LFR(%) = 100.0``,
+    ``RET-He(pg) = 5.3``), which survive a naive "drop the zeros" filter.  See
+    :mod:`~sysmexcbctools.data.sysmexclean.discrete_channels` for the mapping.
+
+    **Position in the pipeline is load-bearing.**  This runs immediately after
+    :func:`encode_flags` and before everything else:
+
+    - after, because ``encode_flags`` fills null flags with ``0`` and would
+      otherwise re-fabricate "flag not raised" for a channel that never ran.
+      Letting it fill on the raw export and blanking afterwards gets both cases
+      right with no extra machinery;
+    - before, because every later step -- clot removal, the NaN report,
+      :func:`analyze_correlations` -- would otherwise compute on the fabricated
+      zeros.  A RET column that is exactly ``0.00`` on every ``CBC+DIFF`` row
+      correlates spuriously with anything separating those rows.
+
+    Two derived columns are deliberately not masked.  ``encode_flags`` builds
+    ``Q-Flag(X)_err`` / ``_disc`` before this runs, so a masked ``Q-Flag(X)``
+    ends NaN while its ``_disc`` companion stays ``1`` -- which is true, the
+    analyser did report that channel as not run.  ``process_marks`` runs after
+    this, so its ``make_dummy`` columns are derived from already-masked marks.
+    """
+    if "Discrete" not in df.columns:
+        logger.warning(
+            "No 'Discrete' column; cannot tell which channels ran, "
+            "leaving the analyser's zero fill in place"
+        )
+        return df
+
+    logger.info("Setting measurements not named in the Discrete column to NaN")
+    df, n_masked = mask_unmeasured(df)
+    logger.info(
+        f"Set {n_masked} cells to NaN across {df['Discrete'].nunique()} Discrete "
+        f"value(s) because their analyser channel was never run"
     )
-    logger.debug(
-        f"Setting values to NaN for {len(diff_cols)} DIFF measurements if not performed"
-    )
-    logger.debug(
-        f"Setting values to NaN for {len(ret_cols)} RET measurements if not performed"
-    )
-    logger.debug(
-        f"Setting values to NaN for {len(wpc_cols)} WPC measurements if not performed"
-    )
-
-    # Set columns to NaN if they are not in the discrete column
-    if cbc_cols:
-        df.loc[
-            (df["discrete_freeselect"] == False) & (df["discrete_cbc"] == False),
-            cbc_cols,
-        ] = np.nan
-
-    if diff_cols:
-        df.loc[
-            (df["discrete_freeselect"] == False) & (df["discrete_diff"] == False),
-            diff_cols,
-        ] = np.nan
-
-    if ret_cols:
-        df.loc[
-            (df["discrete_freeselect"] == False) & (df["discrete_ret"] == False),
-            ret_cols,
-        ] = np.nan
-
-    if wpc_cols:
-        df.loc[
-            (df["discrete_freeselect"] == False) & (df["discrete_wpc"] == False),
-            wpc_cols,
-        ] = np.nan
-
-    # Remove discrete helper columns
-    df = df.drop(columns=[col for col in df.columns if col.startswith("discrete_")])
-
     return df
 
 
@@ -500,6 +482,30 @@ def remove_redundant_columns(df, logger):
     """Remove known redundant columns."""
     logger.info(f"Removing {len(REDUNDANT_HGB_COLUMNS)} redundant HGB columns")
     df.drop(columns=REDUNDANT_HGB_COLUMNS, errors="ignore", inplace=True)
+    return df
+
+
+def remove_empty_columns(df, logger):
+    """Remove columns that are NaN in every row.
+
+    A column with no value anywhere carries no signal for downstream analysis.
+    This is the only NaN-based filter in the pipeline and it is deliberately
+    column-wise: no row is ever removed for having gained NaNs, because after
+    :func:`mask_unmeasured_channels` a NaN means "this channel was not ordered",
+    not "this record is incomplete".
+
+    Note that which columns are empty depends on the channel mix of the cohort
+    being processed, so two runs over different cohorts can yield frames with
+    different columns.  Pass ``drop_empty_columns=False`` to keep the full
+    column set when the results have to line up across runs.
+    """
+    shape_before = df.shape
+    df = df.dropna(axis=1, how="all")
+    dropped = shape_before[1] - df.shape[1]
+    logger.info(
+        f"Removed {dropped} columns that were empty for every row "
+        f"({dropped/shape_before[1]:.2%})"
+    )
     return df
 
 

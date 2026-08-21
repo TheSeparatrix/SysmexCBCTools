@@ -22,6 +22,7 @@ processing:
   std_threshold: 1.0  # Threshold for comparing multiple measurements
   keep_drop_rows: false # If true, no rows will be dropped. Instead, the reason for dropping is added as a new column, prefixed with 'drop'.
   make_dummy_marks: false # If true, each measurement with a data mark field (ending in "/M") will have that field one-hot encoded into multiple columns in the final output
+  drop_empty_columns: true # Remove columns that are NaN for every row. Which columns those are depends on the cohort's channel mix, so set false when separate runs have to share a column set.
   
   # Memory optimization settings
   use_memory_optimized: true # Use memory-optimized processing for large datasets (recommended for >100k rows)
