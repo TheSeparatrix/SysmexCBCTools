@@ -263,16 +263,12 @@ def read_xn_sample_from_duckdb(
 
     dup_mask = df.duplicated(subset=["Sample No.", "Date", "Time"], keep=False)
     if dup_mask.any():
-        dupes = (
-            df.loc[dup_mask, ["Sample No.", "Date", "Time"]]
-            .drop_duplicates()
-            .head(20)
-            .to_dict("records")
-        )
+        dup_keys = df.loc[dup_mask, ["Sample No.", "Date", "Time"]].drop_duplicates()
+        dupes_preview = dup_keys.head(20).to_dict("records")
         raise ValueError(
-            f"{len(dupes)} (Sample No., Date, Time) combination(s) appear in "
+            f"{len(dup_keys)} (Sample No., Date, Time) combination(s) appear in "
             f"more than one of the {len(roots)} combined datasets -- refusing "
-            f"to guess which is authoritative. First few: {dupes}. This is "
+            f"to guess which is authoritative. First few: {dupes_preview}. This is "
             f"expected to be impossible for datasets transferred via "
             f"`bc-sysmex-format package --obfuscate` with distinct per-site "
             f"secrets; check the source datasets."
