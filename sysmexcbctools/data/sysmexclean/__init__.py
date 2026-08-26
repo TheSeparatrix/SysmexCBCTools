@@ -5,6 +5,7 @@ This package provides tools for cleaning and standardizing Sysmex XN_SAMPLE.csv
 files exported from decrypted .116 files.
 """
 
+from .duckdb_source import read_xn_sample_from_duckdb
 from .processor_api import XNSampleProcessor
 
-__all__ = ["XNSampleProcessor"]
+__all__ = ["XNSampleProcessor", "read_xn_sample_from_duckdb"]

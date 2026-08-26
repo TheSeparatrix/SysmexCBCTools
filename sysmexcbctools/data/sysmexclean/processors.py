@@ -438,20 +438,33 @@ def handle_multiple_measurements(df, logger, std_threshold=1.0, keep_drop_rows=F
     return df, many_samples_df, only_one_different_df
 
 
+def _is_text_dtype(dtype):
+    """True for a column pandas did not parse as a number.
+
+    Such columns are ``object`` under pandas 2, but from pandas 3.0 a column
+    read from CSV defaults to the ``str`` dtype, which does not compare equal
+    to ``"object"``.  Testing for both leaves pandas 2 behaviour exactly as it
+    was -- nothing yields a ``StringDtype`` there unless it is asked for -- and
+    keeps the checks below alive under pandas 3, where they would otherwise all
+    be false and the ``"----"`` masking would silently never fire.
+    """
+    return dtype == "object" or isinstance(dtype, pd.StringDtype)
+
+
 def clean_non_numeric_values(df, logger):
     """Clean non-numeric values and handle dashes and spaces."""
     # Convert to numeric where possible
     # Note: errors='ignore' is deprecated, so we apply column-by-column
     for col in df.columns:
-        if df[col].dtype == "object":
+        if _is_text_dtype(df[col].dtype):
             try:
                 df[col] = pd.to_numeric(df[col])
             except (ValueError, TypeError):
-                # Keep as object if conversion fails
+                # Keep as text if conversion fails
                 pass
 
     # Check for remaining non-numeric columns
-    non_numeric_columns = df.columns[df.dtypes == "object"].tolist()
+    non_numeric_columns = [c for c in df.columns if _is_text_dtype(df[c].dtype)]
     logger.info(
         f"Found {len(non_numeric_columns)} columns with non-numeric values: {non_numeric_columns}"
     )
@@ -459,7 +472,7 @@ def clean_non_numeric_values(df, logger):
     # Replace dashes and spaces with NaN
     # Use mask instead of replace to avoid downcasting warning
     for col in df.columns:
-        if df[col].dtype == "object":
+        if _is_text_dtype(df[col].dtype):
             df[col] = df[col].mask(df[col].isin(["----", "      "]))
 
     # Log columns with NaN values
