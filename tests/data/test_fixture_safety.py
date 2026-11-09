@@ -2,6 +2,7 @@
 
 import csv
 import re
+import subprocess
 from pathlib import Path
 
 _FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -22,3 +23,14 @@ def test_fixtures_hold_only_qc_samples():
     assert samples, "no sample numbers found in the fixtures"
     non_qc = sorted(s for s in samples if not _QC_RE.match(s))
     assert not non_qc, f"non-QC sample numbers in tests/data/fixtures/: {non_qc[:10]}"
+
+
+def test_no_fixture_is_gitignored():
+    """The .gitignore's patient-data rules (``*.116.csv``, ``XN_SAMPLE*.csv``)
+    match fixture names too: an ignored fixture passes here and is missing from
+    every clone.  Un-ignore it in .gitignore, under the QC fixture exceptions."""
+    ignored = subprocess.run(
+        ["git", "ls-files", "--others", "--ignored", "--exclude-standard", str(_FIXTURES)],
+        capture_output=True, text=True, check=True, cwd=_FIXTURES,
+    ).stdout.splitlines()
+    assert not ignored, f"gitignored fixtures: {ignored}"

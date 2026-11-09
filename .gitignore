@@ -127,6 +127,8 @@ dev/
 # Flow cytometry files (.116 files)
 *.116
 *.116.csv
+# QC material only, guarded by tests/data/test_fixture_safety.py
+!tests/data/fixtures/**/*.116.csv
 
 # Sample number files (may contain patient IDs)
 **/samples/*.npy

@@ -141,7 +141,7 @@ def build_matching_keys(df: pd.DataFrame) -> set[tuple[str, str]]:
     dt = pd.to_datetime(combined, format="%Y/%m/%d %H:%M:%S", errors="raise")
     dt_strs = dt.dt.strftime("%Y%m%d_%H%M%S")
     sample_nos = _normalize_sample_no_series(df["Sample No."])
-    return set(zip(sample_nos, dt_strs, strict=True))
+    return set(zip(sample_nos, dt_strs))
 
 
 def derive_source_dirs(input_files: list[str]) -> list[Path]:
@@ -777,7 +777,7 @@ def filter_output_data(
             dt_strs = dt.dt.strftime("%Y%m%d_%H%M%S")
 
             candidates = pd.Series(
-                list(zip(sample_nos, dt_strs, strict=True)),
+                list(zip(sample_nos, dt_strs)),
                 index=chunk.index,
             )
             in_match = dt.notna() & candidates.isin(matching_keys)
