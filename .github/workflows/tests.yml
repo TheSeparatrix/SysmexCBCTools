@@ -16,6 +16,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: false
       # Syntax errors, undefined names, and PEP 604 unions that break Python 3.9.
       # ponytail: a subset until the rest of the ruff backlog is cleared.
       - run: uvx ruff check . --select E9,F63,F7,F82,FA102
