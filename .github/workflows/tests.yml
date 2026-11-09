@@ -34,6 +34,8 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+          # No lock file here; key the cache on the dependency declarations.
+          cache-dependency-glob: pyproject.toml
       # No [dataset]: bloodcounts-sysmex-format is private, so the direct-route
       # tests skip here.
       - run: uv venv -p ${{ matrix.python }}
