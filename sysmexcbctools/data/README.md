@@ -21,6 +21,9 @@ The data cleaning module provides a scikit-learn-style API for processing Sysmex
 # Install with data module dependencies
 pip install -e ".[data]"
 
+# To clean Sysmex datasets (bloodcounts-sysmex-format; Python >= 3.12)
+pip install -e ".[data,dataset]"
+
 # Or install all dependencies
 pip install -e ".[all]"
 ```
@@ -102,6 +105,30 @@ files = [
 processor = XNSampleProcessor()
 df = processor.process_files(files, dataset_name="consolidated", save_output=False)
 ```
+
+### Sysmex Datasets (the Direct Route)
+
+`XN_SAMPLE.csv` read from disk is the default (the HAAS route). A
+[bloodcounts-sysmex-format](https://github.com/bloodcounts/bloodcounts-sysmex-format)
+dataset can be cleaned directly instead, read through the format's read API only
+(needs the `[dataset]` extra):
+
+```python
+processor = XNSampleProcessor(output_dir="./output")
+df = processor.process_files(
+    bc_sysmex_dataset_dir=["site_a", "site_b"],  # one dataset directory or several
+    hospital_id="A",                              # optional
+    sample_nos=["123456", "123457"],              # optional
+)
+```
+
+The rows are reshaped into what the HAAS route loads and cleaned by the same steps;
+the output starts with each row's `measurement_id`. It differs from cleaning the
+analyser's `XN_SAMPLE.csv` in that the dataset stores a Q-Flag word (`DISCRETE`,
+`ERROR`) and a `----` / `++++` placeholder in a numeric column as empty. A measurement
+in more than one of the datasets is refused, and so is a path that is not a dataset
+directory (e.g. a path to `database.duckdb`). The direct route requires an
+`output_dir`: its processing record names every measurement read.
 
 ### Custom Parameters
 
@@ -186,6 +213,12 @@ Every run with an output directory writes a **processing record** to
 - `processing_record_<UTC>_<pid>_dropped_rows.csv`: every dropped row
   (`Sample No.`, `Date`, `Time`, step, reason), named by the record's `dropped_rows` line.
 
+On the direct route the record also names the bloodcounts-sysmex-format version
+(`reader`), each dataset directory (`dataset <i>`, in place of the input files) and
+each measurement read (`read <i> <measurement_id>`, then `measurements_read`), and the
+dropped rows carry `measurement_id`: the audit record the format's ADR 0002 asks of a
+tool that writes per-measurement data out of a dataset.
+
 `output_dir=None` writes nothing at all (and refuses `save_output`, the ancillary copies
 and `log_to_file`). `log_to_file=True` additionally saves the diagnostic CSVs:
 
@@ -226,6 +259,7 @@ Main class for processing Sysmex XN_SAMPLE data.
 **Methods:**
 
 - `process_files(input_files, dataset_name=None, save_output=False)`: Process one or more CSV files
+- `process_files(bc_sysmex_dataset_dir=..., hospital_id=None, sample_nos=None)`: Process one or more Sysmex datasets
 - `process(dataset_name)`: Process a dataset from config file
 
 ## Processing Steps

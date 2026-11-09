@@ -1,6 +1,6 @@
 # SysmexCBCTools
 
-Tools for cleaning, aligning and correcting Sysmex XN-series CBC data. Sysmex vocabulary (HAAS output, Sysmex channel, scattergram, measurement, dataset, read API) follows the [bloodcounts-sysmex-format glossary](https://github.com/bloodcounts/bloodcounts-sysmex-format/blob/main/CONTEXT.md).
+Tools for cleaning, aligning and correcting Sysmex XN-series CBC data. Sysmex vocabulary (HAAS output, Sysmex channel, scattergram, measurement, dataset, read API) follows the [bloodcounts-sysmex-format glossary](https://github.com/bloodcounts/bloodcounts-sysmex-format/blob/main/GLOSSARY.md).
 
 ## Input routes
 

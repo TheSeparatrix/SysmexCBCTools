@@ -8,6 +8,20 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+QC_CAL = Path(__file__).resolve().parent / "fixtures" / "qc_cal" / "XN_SAMPLE.csv"
+
+
+def haas_export(directory: Path, sample_nos=None) -> Path:
+    """The fixture as ``directory/XN_SAMPLE.csv``, its two rows renamed *sample_nos*."""
+    lines = QC_CAL.read_text(encoding="latin-1").split("\n")
+    for i, new in enumerate(sample_nos or [], 1):
+        assert lines[i].count(",QC-32941101,") == 1
+        lines[i] = lines[i].replace(",QC-32941101,", f",{new},")
+    directory.mkdir(parents=True)
+    path = directory / "XN_SAMPLE.csv"
+    path.write_text("\n".join(lines), encoding="latin-1")
+    return path
+
 
 @pytest.fixture
 def minimal_df():

@@ -237,7 +237,7 @@ class XNSampleProcessor:
 
     def process_files(
         self,
-        input_files: pd.DataFrame | str | list[str],
+        input_files: pd.DataFrame | str | list[str] | None = None,
         dataset_name: str = "dataset",
         save_output: bool = False,
         *,
@@ -247,13 +247,18 @@ class XNSampleProcessor:
         sct_archive_files: str | list[str] | None = None,
         sample_nos: list[str] | None = None,
         output_format: str = "csv",
+        bc_sysmex_dataset_dir: str | os.PathLike | list[str | os.PathLike] | None = None,
+        hospital_id: str | None = None,
     ) -> pd.DataFrame:
         """
-        Process XN_SAMPLE data from files or a pre-loaded DataFrame.
+        Process XN_SAMPLE data from files, a pre-loaded DataFrame, or Sysmex datasets.
+
+        Give exactly one of *input_files* (the HAAS route) and
+        *bc_sysmex_dataset_dir* (the direct route).
 
         Parameters
         ----------
-        input_files : pd.DataFrame or str or list of str
+        input_files : pd.DataFrame or str or list of str, optional
             Data to process. Accepts:
             - A ``pd.DataFrame`` (bypasses file loading entirely).
             - A path to a ``.csv``, ``.parquet``, or ``.pq`` file.
@@ -299,6 +304,17 @@ class XNSampleProcessor:
             Each entry is cast to ``str`` before comparison, so integer
             sample numbers (e.g. ``123456``) are handled transparently.
             Works with ``copy_output_data=True`` and ``copy_sct=True``.
+        bc_sysmex_dataset_dir : path or list of paths, optional
+            One or several Sysmex dataset directories, read through the
+            bloodcounts-sysmex-format read API (``pip install
+            'sysmexcbctools[dataset]'``).  Measurements are selected by
+            *hospital_id* and *sample_nos*, reshaped into what the HAAS route
+            loads from ``XN_SAMPLE.csv`` and cleaned by the same steps; the
+            output starts with each row's ``measurement_id``.  A measurement in
+            more than one of the datasets is refused.  Requires an
+            ``output_dir``: the processing record names every measurement read.
+        hospital_id : str, optional
+            Keep only this hospital's measurements.  Direct route only.
 
         Returns
         -------
@@ -308,10 +324,13 @@ class XNSampleProcessor:
         Raises
         ------
         ValueError
-            If *copy_output_data* or *copy_sct* (without
-            *sct_archive_files*) is True but *input_files* is a
-            DataFrame (source directories cannot be derived), or if
+            If not exactly one of *input_files* and *bc_sysmex_dataset_dir*
+            is given, if *copy_output_data* or *copy_sct* (without
+            *sct_archive_files*) is True but *input_files* are not file
+            paths (source directories cannot be derived), or if
             *save_output* is False (no output directory to write to).
+        FileNotFoundError
+            If a *bc_sysmex_dataset_dir* is not a dataset directory.
 
         Examples
         --------
@@ -323,6 +342,12 @@ class XNSampleProcessor:
         Process a parquet file:
 
         >>> df = processor.process_files("data/XN_SAMPLE.parquet")
+
+        Process one hospital of two Sysmex datasets:
+
+        >>> df = processor.process_files(
+        ...     bc_sysmex_dataset_dir=["site_a", "site_b"], hospital_id="A"
+        ... )
 
         Process a pre-loaded DataFrame:
 
@@ -353,14 +378,35 @@ class XNSampleProcessor:
         if isinstance(sct_archive_files, str):
             sct_archive_files = [sct_archive_files]
 
+        if (input_files is None) == (bc_sysmex_dataset_dir is None):
+            raise ValueError("Give exactly one of input_files and bc_sysmex_dataset_dir.")
+        if hospital_id is not None and bc_sysmex_dataset_dir is None:
+            raise ValueError("hospital_id needs bc_sysmex_dataset_dir.")
+        if bc_sysmex_dataset_dir is not None and self.output_dir is None:
+            raise ValueError(
+                "bc_sysmex_dataset_dir requires an output_dir, for the processing record."
+            )
+        if isinstance(bc_sysmex_dataset_dir, (str, os.PathLike)):
+            bc_sysmex_dataset_dir = [bc_sysmex_dataset_dir]
+        if bc_sysmex_dataset_dir is not None:
+            try:
+                from ._sysmex_dataset import read_xn_sample
+            except ImportError as e:
+                raise ImportError(
+                    "bc_sysmex_dataset_dir needs bloodcounts-sysmex-format. "
+                    "Install it with: pip install 'sysmexcbctools[dataset]'"
+                ) from e
+
         # Validate ancillary copy options
         needs_source_dirs = copy_output_data or (
             copy_sct and sct_archive_files is None
         )
-        if needs_source_dirs and isinstance(input_files, pd.DataFrame):
+        if needs_source_dirs and (
+            input_files is None or isinstance(input_files, pd.DataFrame)
+        ):
             raise ValueError(
                 "copy_output_data (and copy_sct without sct_archive_files) "
-                "require file paths as input_files, not a DataFrame."
+                "require file paths as input_files, not a DataFrame or a dataset."
             )
         if (copy_output_data or copy_sct) and not save_output:
             raise ValueError(
@@ -378,6 +424,8 @@ class XNSampleProcessor:
             "sct_archive_files": sct_archive_files,
             "sample_nos": sample_nos,
             "output_format": output_format,
+            "bc_sysmex_dataset_dir": bc_sysmex_dataset_dir,
+            "hospital_id": hospital_id,
         }
         if isinstance(input_files, str):
             input_files = [input_files]
@@ -387,14 +435,20 @@ class XNSampleProcessor:
             arguments,
             input_files,
             self.logger,
+            bc_sysmex_dataset_dir,
         ) as self._record:
             try:
                 self.logger.info(f"Processing dataset: {dataset_name}")
 
-                # Dispatch: DataFrame, single path, or list of paths
-                if isinstance(input_files, pd.DataFrame):
+                # Dispatch: datasets, DataFrame, single path, or list of paths
+                input_file_paths: list[str] | None = None
+                if bc_sysmex_dataset_dir is not None:
+                    df = read_xn_sample(
+                        bc_sysmex_dataset_dir, hospital_id, sample_nos, self._record.read
+                    )
+                    sample_nos = None  # already applied
+                elif isinstance(input_files, pd.DataFrame):
                     df = input_files
-                    input_file_paths: list[str] | None = None
                 else:
                     input_file_paths = list(input_files)
                     df = load_dataframes(input_file_paths, self.logger)

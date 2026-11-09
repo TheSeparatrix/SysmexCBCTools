@@ -7,6 +7,12 @@ then every removed column and the per-column counts of the value-changing
 steps, closing with the outcome (traceback on failure) and UTC end.  Every
 dropped row goes to a sidecar CSV (row key, step, reason) named in the header.
 
+On the direct route the header names the dataset directories and the
+bloodcounts-sysmex-format version, a ``read <dataset> <measurement_id>`` line
+names each measurement read, and rows are keyed by ``measurement_id`` too: the
+audit record the format's ADR 0002 asks of a tool writing per-measurement data
+out of a dataset.
+
 Both files are written as the run goes -- the record line-buffered, the CSV
 appended step by step -- so a crashed run leaves everything up to the crash.
 """
@@ -58,9 +64,11 @@ def _tool() -> str:
 class ProcessingRecord:
     """Writes to an open record; without one (no output directory) does nothing."""
 
-    def __init__(self, f=None, rows_path: Path | None = None):
+    def __init__(self, f=None, rows_path: Path | None = None, row_key=ROW_KEY):
         self._f = f
         self.rows_path = rows_path
+        self.row_key = row_key
+        self.measurements_read = 0
 
     def __bool__(self) -> bool:
         return self._f is not None
@@ -72,8 +80,14 @@ class ProcessingRecord:
     def dropped(self, step: str, rows: pd.DataFrame, reasons) -> None:
         """Append *rows* (the dropped rows, as they were) to the sidecar CSV."""
         if self._f is not None and len(rows):
-            out = rows.reindex(columns=ROW_KEY).assign(step=step, reason=reasons)
+            out = rows.reindex(columns=self.row_key).assign(step=step, reason=reasons)
             out.to_csv(self.rows_path, mode="a", header=False, index=False)
+
+    def read(self, dataset_index: int, measurement_id: str) -> None:
+        """Name a measurement read from the *dataset_index*-th (1-based) dataset."""
+        if self._f is not None:
+            self._f.write(f"read {dataset_index} {measurement_id}\n")
+            self.measurements_read += 1
 
     def removed_column(self, column: str, step: str, reason: str) -> None:
         self.write(
@@ -88,12 +102,15 @@ class ProcessingRecord:
 
 
 @contextmanager
-def processing_record(output_dir, settings: dict, arguments: dict, inputs, logger):
+def processing_record(
+    output_dir, settings: dict, arguments: dict, inputs, logger, dataset_dirs=None
+):
     """Open the record for one run and yield it as a :class:`ProcessingRecord`.
 
-    *inputs* is a list of file paths or a DataFrame.  With no *output_dir*
-    nothing is written.  An exception is recorded as a failure with its
-    traceback and re-raised.
+    *inputs* is a list of file paths or a DataFrame, or None on the direct
+    route, which gives *dataset_dirs* instead.  With no *output_dir* nothing is
+    written.  An exception is recorded as a failure with its traceback and
+    re-raised.
     """
     if output_dir is None:
         yield ProcessingRecord()
@@ -104,18 +121,25 @@ def processing_record(output_dir, settings: dict, arguments: dict, inputs, logge
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     path = logdir / f"processing_record_{stamp}_{os.getpid()}.log"
     rows_path = path.with_name(f"{path.stem}_dropped_rows.csv")
-    pd.DataFrame(columns=[*ROW_KEY, "step", "reason"]).to_csv(rows_path, index=False)
+    row_key = ROW_KEY if dataset_dirs is None else ["measurement_id", *ROW_KEY]
+    pd.DataFrame(columns=[*row_key, "step", "reason"]).to_csv(rows_path, index=False)
 
     with open(path, "x", buffering=1, encoding="utf-8") as f:
-        rec = ProcessingRecord(f, rows_path)
+        rec = ProcessingRecord(f, rows_path, row_key)
         rec.write("started_utc", _utc_now())
         try:
             rec.write("user", getpass.getuser())
             rec.write("host", socket.gethostname())
             rec.write("tool", _tool())
+            if dataset_dirs is not None:
+                version = metadata.version("bloodcounts-sysmex-format")
+                rec.write("reader", f"bloodcounts-sysmex-format {version}")
             rec.write("settings", json.dumps(settings, default=str))
             rec.write("arguments", json.dumps(arguments, default=str))
-            if isinstance(inputs, pd.DataFrame):
+            if dataset_dirs is not None:
+                for i, p in enumerate(dataset_dirs, 1):
+                    rec.write(f"dataset {i}", Path(p).resolve())
+            elif isinstance(inputs, pd.DataFrame):
                 shape = f"{inputs.shape[0]} rows, {inputs.shape[1]} columns"
                 rec.write("input 1", f"DataFrame ({shape})")
             else:
@@ -126,10 +150,14 @@ def processing_record(output_dir, settings: dict, arguments: dict, inputs, logge
             logger.info(f"Processing record: {path}")
             yield rec
         except BaseException:
+            if dataset_dirs is not None:
+                rec.write("measurements_read", rec.measurements_read)
             rec.write("outcome", "failure")
             f.writelines("  " + line for line in traceback.format_exc().splitlines(True))
             raise
         else:
+            if dataset_dirs is not None:
+                rec.write("measurements_read", rec.measurements_read)
             rec.write("outcome", "success")
         finally:
             rec.write("ended_utc", _utc_now())

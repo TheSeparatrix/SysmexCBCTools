@@ -64,6 +64,7 @@ pip install -e ".[all]"
 pip install -e ".[transfer]"    # GMM-OT alignment
 pip install -e ".[correction]"  # GAM-based correction
 pip install -e ".[disae2]"      # Deep learning module
+pip install -e ".[data,dataset]"  # Clean Sysmex datasets (Python >= 3.12)
 
 # For running example notebooks (includes jupyter, matplotlib, SciencePlots, phate)
 pip install -e ".[notebooks]"
