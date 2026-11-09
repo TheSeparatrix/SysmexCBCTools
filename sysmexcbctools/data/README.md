@@ -55,7 +55,7 @@ processor = XNSampleProcessor(
     remove_clotintube=True,
     remove_multimeasurementsamples=True,
     std_threshold=1.0,
-    log_to_file=False,  # No log files by default
+    log_to_file=False,  # No diagnostic CSVs by default
     verbose=1
 )
 
@@ -171,17 +171,33 @@ df = processor.process_files(
 # Saves to: ./results/cleaned_data_my_study_YYYYMMDD_HHMMSS.csv
 ```
 
-### Enable Logging and Diagnostics
+### Processing Record and Diagnostics
+
+Every run with an output directory writes a **processing record** to
+`output_dir/logs/`, whatever `log_to_file` says: how each measurement was processed.
+
+- `processing_record_<UTC>_<pid>.log`: `key: value` lines -- UTC start, user, host,
+  SysmexCBCTools version (plus git commit from a checkout), every processor setting,
+  the `process_files` arguments, the input files, the output directory; one
+  `removed_column` line (JSON: column, step, reason) per removed column; per-column
+  counts of the cells changed by flag encoding, masking and non-numeric cleanup
+  (`cells <step> filled_0|set_nan`); then the outcome (with the traceback on failure)
+  and UTC end. Written as the run goes, so a crashed run is still accounted for.
+- `processing_record_<UTC>_<pid>_dropped_rows.csv`: every dropped row
+  (`Sample No.`, `Date`, `Time`, step, reason), named by the record's `dropped_rows` line.
+
+`output_dir=None` writes nothing at all (and refuses `save_output`, the ancillary copies
+and `log_to_file`). `log_to_file=True` additionally saves the diagnostic CSVs:
 
 ```python
 processor = XNSampleProcessor(
-    log_to_file=True,  # Create log files
+    log_to_file=True,  # Also save diagnostic CSVs
     output_dir="./output"
 )
 
 df = processor.process_files("XN_SAMPLE.csv", save_output=True)
-# Creates: output/XN_SAMPLE_YYYYMMDD_HHMMSS.log
-# Creates: output/*_diagnostic_*.csv (if issues found)
+# Creates: output/logs/processing_record_*.log (+ _dropped_rows.csv)
+# Creates: output/*_oddmultiplemeasurements.csv etc. (if issues found)
 ```
 
 ## API Reference
@@ -202,9 +218,9 @@ Main class for processing Sysmex XN_SAMPLE data.
 - `drop_empty_columns` (bool, default=True): Remove columns that are NaN for every row
 - `use_memory_optimized` (bool, default=True): Use memory-efficient processing
 - `enable_memory_monitoring` (bool, default=True): Log memory usage
-- `output_dir` (str, default="./output"): Output directory
+- `output_dir` (str or None, default="./output"): Output directory; holds the processing record. `None` writes nothing
 - `output_prefix` (str, default="XN_SAMPLE_processed"): Output filename prefix
-- `log_to_file` (bool, default=False): Create log and diagnostic files
+- `log_to_file` (bool, default=False): Also save diagnostic CSV files
 - `verbose` (int, default=1): Verbosity level (0=silent, 1=info, 2=debug)
 
 **Methods:**
@@ -258,9 +274,12 @@ computing on zeros -- `LFR(%) = 100.0` (it is `100 - MFR - HFR`), `RET-He(pg)` a
 `RBC-He(pg) = 5.3` (a floor) -- and those survive a naive "drop the zeros" filter as
 perfectly plausible values.
 
-The processor therefore replaces them with NaN. The rule composes two tables from the
-Sysmex data dictionary, carried in `sysmexclean/discrete_channels.py` (the rules) and its
-generated sibling `sysmexclean/_channel_table.py` (the data):
+The processor therefore replaces them with NaN, by the same rule as
+bloodcounts-sysmex-format. SysmexCBCTools keeps its own copy, so cleaning `XN_SAMPLE.csv`
+does not need the format installed; a test compares the two column for column whenever
+it is. The rule composes two tables from the AUMC XN data dictionary, carried in
+`sysmexclean/discrete_channels.py` (the rules) and its generated sibling
+`sysmexclean/_channel_table.py` (the data, copied from the format):
 
 | `Discrete` token | Mechanical channels |
 |---|---|
@@ -272,23 +291,26 @@ generated sibling `sysmexclean/_channel_table.py` (the data):
 
 plus `COLUMN_CHANNELS`, which attributes each of 441 `XN_SAMPLE` columns to the channels
 that populate it. A column is kept when it is always-on or when any channel populating it
-is active; otherwise it is set to NaN. Both the expanded (`CBC+DIFF+RET+PLT-F`) and the
+is active -- or, for a value derived from several channels (`REQUIRES_ALL`: `NEUT#` is a
+WDF percentage times a WNR count, the `DLT-*` ratios), when every one is; otherwise it is
+set to NaN. Both the expanded (`CBC+DIFF+RET+PLT-F`) and the
 compact (`CDRP`) spellings of `Discrete` are understood.
 
 Four carve-outs, all load-bearing:
 
-- a mark column `X/M` takes its **value** column's attribution, which also corrects the
-  dictionary's one error (`PLT-I/M` is filed under PLT-F, but `PLT-I` is a CBC-RBC/PLT
+- a mark column `X/M` takes its **value** column's attribution (exactly `X(unit)`, never
+  `X(hsA)(unit)`), which also corrects a dictionary error (`PLT-I/M` is filed under PLT-F, but `PLT-I` is a CBC-RBC/PLT
   parameter whose marks are real under `CBC+DIFF`);
 - the duplicated-header suffixes are stripped before lookup (`.1` as pandas mangles them,
   `_1` as step 4 above spells them), so a repeat is masked exactly like its original;
 - only whole-blood rows (`Measurement Mode = WB`) are masked -- body fluids have their own
   parameter set and a different channel story;
 - a column the dictionary does not attribute at all is **never** masked. Only a positive
-  attribution justifies discarding a value.
+  attribution justifies discarding a value. Two attributions are corrected over the
+  dictionary: `TNC(10^3/uL)` is CBC-WNR, `IP ABN(WBC)Neutoropenia` is DIFF/WDF.
 
-Rows whose `Discrete` reads `FREE SELECT`, or names nothing recognised, are left exactly
-as the analyser exported them.
+Rows whose `Discrete` reads `FREE SELECT`, or holds anything unrecognised (`CBC+FOO`), are
+left exactly as the analyser exported them.
 
 ### Reading the NaNs back
 
@@ -342,7 +364,7 @@ dictionary does not cover.
 The processor can generate:
 
 1. **Processed CSV file**: Cleaned and consolidated data
-2. **Log files**: Detailed processing information (if `log_to_file=True`)
+2. **Processing record**: Settings, inputs, every dropped row and removed column with its reason, outcome (whenever `output_dir` is set)
 3. **Diagnostic files**: Samples with multiple inconsistent measurements for clinical review
 4. **Correlation analysis**: Relationships between columns and core FBC features
 
@@ -389,8 +411,8 @@ pytest tests/data/test_discrete_channels.py -v
 ## Notes
 
 - The default configuration is conservative and preserves most data
-- Review log files to understand what changes were made
-- Use `log_to_file=False` (default) for Jupyter notebooks to avoid file clutter
+- Review the processing record to understand what changes were made
+- Pass `output_dir=None` for exploratory notebook runs that should write nothing
 - For large datasets (>100k rows), memory-optimized mode is automatically used
 - The `std_threshold` parameter controls how strict multiple measurement comparison is:
   - Lower values (e.g., 0.5) = stricter, fewer measurements considered "matching"

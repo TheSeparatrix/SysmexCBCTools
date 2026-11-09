@@ -279,17 +279,21 @@ def process_marks(df, logger, make_dummy=False):
     return df
 
 
+#: IP flags whose value 1 marks a sample as consistent with clot in tube.
+CLOT_INDICATORS = [
+    "IP SUS(RBC)Turbidity/HGB Interf?",
+    "IP SUS(RBC)RBC Agglutination?",
+    "IP SUS(PLT)PLT Clumps?",
+]
+
+
 def remove_clot_in_tube_samples(df, logger, keep_drop_rows=False):
     """Remove samples consistent with clot in tube."""
     logger.info("Removing samples consistent with clot in tube")
     len_before = df.shape[0]
 
     # Remove samples with indicators of clots or turbidity
-    for indicator in [
-        "IP SUS(RBC)Turbidity/HGB Interf?",
-        "IP SUS(RBC)RBC Agglutination?",
-        "IP SUS(PLT)PLT Clumps?",
-    ]:
+    for indicator in CLOT_INDICATORS:
         keep_row_indices = ~(df[indicator] == 1)
         if keep_drop_rows:
             new_col_name = "drop_" + indicator
@@ -305,6 +309,18 @@ def remove_clot_in_tube_samples(df, logger, keep_drop_rows=False):
         f"Removed {rows_dropped} samples with indicators of clot in tube ({rows_dropped/len_before:.2%})"
     )
 
+    return df
+
+
+def coerce_fbc_to_numeric(df, logger):
+    """Make the standard FBC columns numeric; anything unparseable becomes NaN.
+
+    The multiple-measurement comparison needs numbers.  Run as its own step so
+    the processing record counts the placeholders (``----``) it blanks.
+    """
+    for col in STANDARD_FBC_DECRYPT:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
 
 
@@ -401,7 +417,7 @@ def handle_multiple_measurements(df, logger, std_threshold=1.0, keep_drop_rows=F
                     only_one_different.append(group)
         else:
             if keep_drop_rows:
-                for idx in group:
+                for idx in group.index:
                     df.loc[idx, "drop_dup_disagree"] = True
             odd_samples.append(group)
 

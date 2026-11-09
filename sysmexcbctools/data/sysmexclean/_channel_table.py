@@ -1,11 +1,12 @@
 """Mechanical channels populating each XN_SAMPLE column.
 
-GENERATED -- do not edit.  The table is produced from the ``500set`` sheet of
-the Sysmex data dictionary by ``scripts/build_discrete_channel_map.py`` in the
-sibling ``bloodcounts_sysmex_format`` repository, which is where the dictionary
-workbook lives.  When Sysmex ships a new dictionary, regenerate it there and
-copy the result over this file.  The rules that consume the table are
-hand-written in :mod:`sysmexcbctools.data.sysmexclean.discrete_channels`.
+GENERATED -- do not edit.  A copy of ``bc_sysmex_format/_channel_table.py`` in
+bloodcounts-sysmex-format, which regenerates it from the AUMC XN data
+dictionary (``SysmexDictionary_2025 Aug25.xlsx``) with
+``scripts/build_discrete_channel_map.py``.  Copy that file over this one when it
+changes; SysmexCBCTools keeps its own copy so the HAAS route does not depend on
+the format.  The rules that consume the table are in
+:mod:`sysmexcbctools.data.sysmexclean.discrete_channels`.
 """
 
 from __future__ import annotations
@@ -462,3 +463,34 @@ COLUMN_CHANNELS: dict[str, frozenset[str]] = {
     "WPC_PLOT_COUNT()": frozenset({"WPC"}),
     "WPC_TOTAL_COUNT()": frozenset({"WPC"}),
 }
+
+#: Columns derived from *all* their channels (a ratio, or a % x a count):
+#: measured only when every one ran, not when any one did.
+REQUIRES_ALL: frozenset[str] = frozenset(
+    {
+        "BA-D#(10^3/uL)",
+        "DLT-PLT-F()",
+        "DLT-PLTO()",
+        "DLT-RBC()",
+        "DLT-WBCD()",
+        "DLT-WBCP()",
+        "EO#(10^3/uL)",
+        "EO-BF#(10^3/uL)",
+        "HF-BF#(10^3/uL)",
+        "HFLC#(10^3/uL)",
+        "IG#(10^3/uL)",
+        "LY-BF#(10^3/uL)",
+        "LYMP#&(10^3/uL)",
+        "LYMPH#(10^3/uL)",
+        "MCH(pg)",
+        "MCHC(g/dL)",
+        "MN#(10^3/uL)",
+        "MO-BF#(10^3/uL)",
+        "MONO#(10^3/uL)",
+        "NE-BF#(10^3/uL)",
+        "NEUT#&(10^3/uL)",
+        "NEUT#(10^3/uL)",
+        "PMN#(10^3/uL)",
+        "TC-BF#(10^3/uL)",
+    }
+)
