@@ -256,3 +256,36 @@ class TestOutputFormat:
                     dataset_name="d",
                     output_format="xml",
                 )
+
+
+_WITHOUT_DATASET_READER = """
+import sys
+
+class _Block:
+    def find_spec(self, name, path=None, target=None):
+        if name.split(".")[0] in ("bc_sysmex_format", "duckdb"):
+            raise ImportError(f"{name} is blocked")
+
+sys.meta_path.insert(0, _Block())
+
+from sysmexcbctools.data import XNSampleProcessor
+
+df = XNSampleProcessor(output_dir=sys.argv[2], verbose=0).process_files(sys.argv[1])
+assert len(df.columns) > 100, df.shape
+"""
+
+
+def test_the_haas_route_runs_without_the_dataset_reader(tmp_path):
+    """Neither bloodcounts-sysmex-format nor duckdb is needed off the direct route."""
+    import subprocess
+    import sys
+
+    from tests.data.conftest import haas_export
+
+    fixture = haas_export(tmp_path / "haas", ["S-0001", "S-0002"])
+    script = tmp_path / "run.py"
+    script.write_text(_WITHOUT_DATASET_READER)
+    subprocess.run(
+        [sys.executable, str(script), str(fixture), str(tmp_path / "out")],
+        cwd=tmp_path, check=True,
+    )

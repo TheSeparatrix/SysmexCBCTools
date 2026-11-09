@@ -8,20 +8,28 @@ with zeros, or occasionally with a constant artefact of computing on zeros
 measurement when it is nothing of the kind, so :func:`mask_unmeasured` replaces
 it with NaN during cleaning.
 
-Two tables compose to decide this, both taken from the Sysmex data dictionary:
+The rule is bloodcounts-sysmex-format's (``bc_sysmex_format.discrete_channels``),
+copied so the HAAS route does not depend on the format: everything from
+:data:`DISCRETE_TO_CHANNELS` to :func:`unmeasured_columns` is the format's code,
+and a test compares the two column for column whenever the format is installed.
+Change the rule there first, then copy it here.
+
+Two tables compose to decide this, both taken from the AUMC (Amsterdam UMC) XN
+data dictionary, ``SysmexDictionary_2025 Aug25.xlsx`` -- compiled by AUMC from
+Sysmex documentation, not issued by Sysmex:
 
 1. :data:`DISCRETE_TO_CHANNELS` -- which mechanical channels each ``Discrete``
    application token drives (sheet ``Discrete vs Channels``).
 2. ``COLUMN_CHANNELS`` in :mod:`sysmexcbctools.data.sysmexclean._channel_table`
    -- which mechanical channels populate each ``XN_SAMPLE`` column (sheet
-   ``500set``).  That module is **generated**; see its docstring.
+   ``500set``).  That module is a **generated** copy of the format's; see its
+   docstring.
 
 A column is *measured* when it is always-on (:data:`ALWAYS`) or when any channel
-that populates it is active.  A column carrying no attribution at all is never
-masked -- see :func:`unmeasured_columns`.
-
-This supersedes the per-combination column lists compiled by Allerdien Visser
-(Amsterdam UMC), which this module replaces.
+that populates it is active -- or, for a value derived from several channels
+(``REQUIRES_ALL``: ``NEUT#`` = % from WDF x WBC from WNR, the ``DLT-*`` ratios),
+when every one is.  A column carrying no attribution at all is never masked --
+see :func:`is_measured`.
 """
 
 from __future__ import annotations
@@ -32,12 +40,15 @@ from collections.abc import Iterable
 import numpy as np
 import pandas as pd
 
-from ._channel_table import ALWAYS, COLUMN_CHANNELS
+from ._channel_table import ALWAYS, COLUMN_CHANNELS, REQUIRES_ALL
 
 __all__ = [
+    "ALWAYS",
+    "COLUMN_CHANNELS",
     "DISCRETE_TO_CHANNELS",
     "WHOLE_BLOOD_MODE",
     "channels_for_column",
+    "is_measured",
     "mask_unmeasured",
     "parse_discrete",
     "unmeasured_by_discrete",
@@ -45,19 +56,30 @@ __all__ = [
 ]
 
 # Which mechanical channels each ``Discrete`` application token drives, keyed on
-# the token exactly as ``Discrete`` spells it.  From the ``Discrete vs
-# Channels`` sheet of the dictionary.
+# the canonical component names :func:`parse_discrete` produces (so ``PLTF``,
+# not ``PLT-F``).  From the ``Discrete vs Channels`` sheet of the dictionary.
 DISCRETE_TO_CHANNELS: dict[str, frozenset[str]] = {
     "CBC": frozenset({"CBC-RBC/PLT", "CBC-HGB", "CBC-WNR"}),
     "DIFF": frozenset({"CBC-WNR", "DIFF/WDF"}),
     "RET": frozenset({"CBC-RBC/PLT", "RET"}),
-    "PLT-F": frozenset({"CBC-RBC/PLT", "PLT-F"}),
+    "PLTF": frozenset({"CBC-RBC/PLT", "PLT-F"}),
     "WPC": frozenset({"CBC-WNR", "DIFF/WDF", "WPC"}),
 }
 
-# Compact single-letter ``Discrete``.  ``W`` for WPC is inferred: no export seen
-# so far carries a compact-form WPC order to confirm it.
-_COMPACT_TO_TOKEN: dict[str, str] = {
+# ``Discrete`` spells PLT-F with a hyphen; ``measurement_components`` and
+# :data:`DISCRETE_TO_CHANNELS` use the hyphen-free form.
+_DISCRETE_TO_COMPONENT: dict[str, str] = {
+    "CBC": "CBC",
+    "DIFF": "DIFF",
+    "RET": "RET",
+    "PLT-F": "PLTF",
+    "WPC": "WPC",
+}
+
+# Compact single-letter ``Discrete``, accepted only when the whole value is made
+# of these letters (``FREE SELECT`` is not ``R`` + ``C``).  ``W`` for WPC is
+# inferred: no export seen so far carries a compact-form WPC order to confirm it.
+_COMPACT_TO_DISCRETE: dict[str, str] = {
     "C": "CBC",
     "D": "DIFF",
     "R": "RET",
@@ -65,31 +87,40 @@ _COMPACT_TO_TOKEN: dict[str, str] = {
     "W": "WPC",
 }
 
-# The compact form is recognised only when the whole value is compact letters.
-# Without this, ``"FREE SELECT"`` would be read letter by letter as ``C`` + ``R``
-# and mask DIFF and PLT-F on a row whose order we cannot actually decode.
-_COMPACT_RE = re.compile(r"^[CDRPW]+$")
-
-# A free-selection order does not name its channels in a form we can decode, so
-# rows carrying one are left exactly as the analyser exported them.
-_FREE_SELECT = "FREE SELECT"
-
 #: ``Measurement Mode`` value for whole blood.  Body-fluid rows have their own
 #: parameter set and a different channel story, so they are never masked.
 WHOLE_BLOOD_MODE = "WB"
 
-# pandas mangles duplicated CSV header names by appending ``.1``, ``.2``, ...
-# and ``normalize_duplicate_columns`` spells the same thing ``_1``, ``_2``.
-# Strip either form before looking a column up.
+# Real exports repeat 35 XN_SAMPLE headers.  The dataset no longer stores the
+# repeats, but a frame read with plain ``pd.read_csv`` --
+# ``scripts/check_discrete_mask.py`` -- has pandas' ``.1``, ``.2``, and a dataset
+# built before ``repair`` dropped them has ``_1``, ``_2``.  Strip either form
+# before looking a column up.
 _MANGLED_SUFFIX = re.compile(r"[._]\d+$")
 
+# Corrections to the dictionary, applied over the generated table.
+_OVERRIDES: dict[str, frozenset[str]] = {
+    # Every channel cell is NO, but AUMC's own definition reads "total nucleated
+    # cell count (WBC + NRBC) calculated from the WNR channel", and real exports
+    # carry TNC = TNC-N.
+    "TNC(10^3/uL)": frozenset({"CBC-WNR"}),
+    # Missing from the dictionary; every other differential-count ABN flag
+    # (Neutrophilia, Lymphopenia, ...) is WDF.
+    "IP ABN(WBC)Neutoropenia": frozenset({"DIFF/WDF"}),
+}
+_CHANNELS: dict[str, frozenset[str]] = {**COLUMN_CHANNELS, **_OVERRIDES}
+
 # A mark column ``X/M`` (data-quality flag for parameter ``X``) is measured
-# exactly when its value column is.  Applying the value column's attribution
-# rather than the mark row's own is one rule instead of a special case, and it
-# corrects the dictionary's only observed error: ``PLT-I/M`` is attributed there
-# to PLT-F, but ``PLT-I`` is a CBC-RBC/PLT parameter whose marks are real under
-# ``CBC+DIFF``.
-_MARK_SUFFIX = re.compile(r"/M$")
+# exactly when its value column ``X(unit)`` is.  Applying the value column's
+# attribution rather than the mark row's own is one rule instead of a special
+# case, and it corrects a dictionary error: ``PLT-I/M`` is attributed there to
+# PLT-F, but ``PLT-I`` is a CBC-RBC/PLT parameter whose marks are real under
+# ``CBC+DIFF``.  The value column must be exactly ``X(...)`` -- a prefix match
+# would also find ``X(hsA)(unit)``, which has different channels.
+_VALUE_COLUMN = re.compile(r"(.+)\([^()]*\)")
+_MARK_TO_VALUE: dict[str, str] = {
+    f"{m.group(1)}/M": key for key in _CHANNELS if (m := _VALUE_COLUMN.fullmatch(key))
+}
 
 
 def parse_discrete(discrete: str | None) -> list[str]:
@@ -98,49 +129,50 @@ def parse_discrete(discrete: str | None) -> list[str]:
     Parameters
     ----------
     discrete : str or None
-        Value such as ``"CBC+DIFF+RET+PLT-F"`` or ``"CDRP"`` (compact form).
-        The compact letter for WPC is inferred as ``W``; no export carrying a
-        compact-form WPC order has been seen to confirm it.
+        Value such as ``"CBC+DIFF+RET+PLT-F"`` or ``"CDRP"`` (compact form),
+        in any case.  The compact letter for WPC is inferred as ``W``; no export
+        carrying a compact-form WPC order has been seen to confirm it.
 
     Returns
     -------
     list of str
-        The tokens named by the field, in channel order (e.g.
-        ``["CBC", "DIFF", "RET", "PLT-F"]``).  Empty when the value is missing,
-        names nothing recognised, or is a free selection -- in every one of
-        those cases the caller must leave the row untouched.
+        The ``measurement_components.component_type`` values named by the field,
+        in channel order (e.g. ``["CBC", "DIFF", "RET", "PLTF"]``).  Empty when
+        the value is missing or holds anything unrecognised (``FREE SELECT``,
+        ``CBC+FOO``): naming only some of the channels that ran would mask the
+        others.
     """
     if not discrete or not isinstance(discrete, str):
         return []
 
-    discrete = discrete.strip()
-    if _FREE_SELECT in discrete.upper():
+    value = discrete.strip().upper()
+    if "+" in value or value in _DISCRETE_TO_COMPONENT:
+        tokens = [t.strip() for t in value.split("+")]
+    elif set(value) <= _COMPACT_TO_DISCRETE.keys():
+        tokens = [_COMPACT_TO_DISCRETE[ch] for ch in value]
+    else:
         return []
 
-    if "+" in discrete:
-        tokens = [t.strip() for t in discrete.split("+")]
-    elif _COMPACT_RE.match(discrete.upper()):
-        tokens = [_COMPACT_TO_TOKEN[ch] for ch in discrete.upper()]
-    else:
-        tokens = [discrete]
-
-    return [t for t in tokens if t in DISCRETE_TO_CHANNELS]
+    if any(t not in _DISCRETE_TO_COMPONENT for t in tokens):
+        return []
+    return list(dict.fromkeys(_DISCRETE_TO_COMPONENT[t] for t in tokens))
 
 
-def channels_for_column(
-    column: str, all_columns: frozenset[str]
-) -> frozenset[str] | None:
+def _attribution_key(column: str) -> str:
+    """The dictionary entry deciding ``column``: its value column for a mark."""
+    base = _MANGLED_SUFFIX.sub("", column)
+    return _MARK_TO_VALUE.get(base, base)
+
+
+def channels_for_column(column: str) -> frozenset[str] | None:
     """Return the channels populating ``column``, or None if unattributed.
 
     Parameters
     ----------
     column : str
         An ``XN_SAMPLE`` column name, possibly carrying a duplicated-header
-        suffix (``X.1`` from pandas, ``X_1`` from
-        ``processors.normalize_duplicate_columns``).
-    all_columns : frozenset of str
-        Every column of the frame, used to resolve a mark column ``X/M`` to its
-        value column ``X(...)``.
+        suffix (``X.1`` from pandas, ``X_1`` from the schema).  A mark column
+        ``X/M`` resolves to its value column ``X(unit)``.
 
     Returns
     -------
@@ -149,17 +181,35 @@ def channels_for_column(
         the dictionary gives the column no positive attribution, in which case
         it must never be masked.
     """
-    base = _MANGLED_SUFFIX.sub("", column)
-    stem = _MARK_SUFFIX.sub("", base)
-    if stem != base:
-        # A mark column: prefer its value column's attribution.
-        for candidate in all_columns:
-            other = _MANGLED_SUFFIX.sub("", candidate)
-            if other.startswith(f"{stem}(") and not other.endswith("/M"):
-                channels = COLUMN_CHANNELS.get(other)
-                if channels:
-                    return channels
-    return COLUMN_CHANNELS.get(base)
+    return _CHANNELS.get(_attribution_key(column))
+
+
+def is_measured(column: str, active: set[str] | frozenset[str]) -> bool | None:
+    """Whether the active channels could have populated ``column``.
+
+    Parameters
+    ----------
+    column : str
+        An ``XN_SAMPLE`` column name (see :func:`channels_for_column`).
+    active : set of str
+        The mechanical channels that ran.
+
+    Returns
+    -------
+    bool or None
+        ``None`` when the column is unattributed (never mask it).  Otherwise
+        True when it is always-on, when every channel of a ``REQUIRES_ALL``
+        column ran, or when any channel of any other column ran.
+    """
+    key = _attribution_key(column)
+    channels = _CHANNELS.get(key)
+    if channels is None:
+        return None
+    if ALWAYS in channels:
+        return True
+    if key in REQUIRES_ALL:
+        return channels <= active
+    return bool(channels & active)
 
 
 def unmeasured_columns(
@@ -170,8 +220,8 @@ def unmeasured_columns(
     Parameters
     ----------
     discrete_components : iterable of str
-        Active ``Discrete`` tokens, as returned by :func:`parse_discrete`
-        (e.g. ``["CBC", "DIFF", "RET", "PLT-F"]``).
+        Active measurement components, as returned by :func:`parse_discrete`
+        (e.g. ``["CBC", "DIFF", "RET", "PLTF"]``).
     columns : iterable of str
         The columns of the frame being cleaned.
 
@@ -185,15 +235,7 @@ def unmeasured_columns(
     active: set[str] = set()
     for component in discrete_components:
         active |= DISCRETE_TO_CHANNELS.get(component, frozenset())
-    all_columns = frozenset(columns)
-    unmeasured = []
-    for column in columns:
-        channels = channels_for_column(column, all_columns)
-        if channels is None or ALWAYS in channels:
-            continue
-        if not (channels & active):
-            unmeasured.append(column)
-    return unmeasured
+    return [c for c in columns if is_measured(c, active) is False]
 
 
 def unmeasured_by_discrete(

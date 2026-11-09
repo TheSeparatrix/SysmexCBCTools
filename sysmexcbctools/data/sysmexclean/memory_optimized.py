@@ -133,7 +133,8 @@ def _handle_multiple_measurements_chunked(df, logger, std_threshold, keep_drop_r
             log_memory_usage(logger, f"After processing chunk {i+1}/{len(chunks)}")
 
     # Concatenate all rows
-    df_result = pd.concat(multi_sample_rows, ignore_index=True) if multi_sample_rows else pd.DataFrame()
+    # Original index kept, so the caller can tell which rows were dropped.
+    df_result = pd.concat(multi_sample_rows) if multi_sample_rows else pd.DataFrame()
 
     # Process diagnostic dataframes
     try:

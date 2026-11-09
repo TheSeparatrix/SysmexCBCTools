@@ -1,0 +1,45 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ruff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: false
+      # Syntax errors, undefined names, and PEP 604 unions that break Python 3.9.
+      # ponytail: a subset until the rest of the ruff backlog is cleared.
+      - run: uvx ruff check . --select E9,F63,F7,F82,FA102
+
+  pytest:
+    name: pytest (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.9 is the floor the HAAS route promises; nothing but running it
+        # catches a 3.10+ call (zip(strict=...)) slipping in.
+        python: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          # No lock file here; key the cache on the dependency declarations.
+          cache-dependency-glob: pyproject.toml
+      # No [dataset]: bloodcounts-sysmex-format is private, so the direct-route
+      # tests skip here.
+      - run: uv venv -p ${{ matrix.python }}
+      - run: uv pip install -e ".[data,dev,memory]"
+      - run: .venv/bin/pytest -q

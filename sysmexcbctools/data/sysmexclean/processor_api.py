@@ -12,12 +12,17 @@ import logging
 import os
 from datetime import datetime
 
+import numpy as np
 import pandas as pd
 
+from ._processing_record import ProcessingRecord, processing_record
+from .constants import SYSMEX_TECHNICAL_SAMPLE_PREFIXES
 from .memory_optimized import handle_multiple_measurements_optimized
 from .processors import (
+    CLOT_INDICATORS,
     analyze_correlations,
     clean_non_numeric_values,
+    coerce_fbc_to_numeric,
     encode_flags,
     handle_multiple_measurements,
     make_union_drop_column,
@@ -82,14 +87,17 @@ class XNSampleProcessor:
         Use memory-optimized processing for large datasets (>100k rows).
     enable_memory_monitoring : bool, default=True
         Log memory usage throughout processing.
-    output_dir : str, default="./output"
-        Directory for output files.
+    output_dir : str or None, default="./output"
+        Directory for output files.  Every run with an output directory
+        writes a processing record (settings, inputs, every dropped row and
+        removed column with its reason, outcome) to ``output_dir/logs/``.
+        ``None`` writes nothing at all; saving output, copying ancillary
+        files and ``log_to_file`` then raise ``ValueError``.
     output_prefix : str, default="XN_SAMPLE_processed"
         Prefix for output filenames.
     log_to_file : bool, default=False
-        If True, write logs to file and save diagnostic CSV files
-        (odd measurements, correlation analysis, etc.) in output_dir/.
-        If False, only log to console and skip diagnostic file creation.
+        If True, save diagnostic CSV files (odd measurements, correlation
+        analysis) in output_dir/.  The processing record is written either way.
     verbose : int, default=1
         Verbosity level. 0 = silent, 1 = info, 2 = debug.
 
@@ -147,7 +155,7 @@ class XNSampleProcessor:
         drop_empty_columns: bool = True,
         use_memory_optimized: bool = True,
         enable_memory_monitoring: bool = True,
-        output_dir: str = "./output",
+        output_dir: str | None = "./output",
         output_prefix: str = "XN_SAMPLE_processed",
         log_to_file: bool = False,
         verbose: int = 1,
@@ -186,9 +194,16 @@ class XNSampleProcessor:
 
         self.log_to_file = log_to_file
         self.verbose = verbose
+        # Every setting, for the processing record.
+        self._setting_names = [
+            *processing_params, "output_dir", "output_prefix", "log_to_file", "verbose",
+            "config_path",
+        ]
 
-        # Create output directory
-        os.makedirs(self.output_dir, exist_ok=True)
+        if self.output_dir is not None:
+            os.makedirs(self.output_dir, exist_ok=True)
+        elif log_to_file:
+            raise ValueError("log_to_file requires an output_dir.")
 
         # Set up logging
         self.logger = self._setup_logger()
@@ -196,6 +211,7 @@ class XNSampleProcessor:
         # Attributes set during processing
         self.last_processed_ = None
         self.diagnostic_files_ = {}
+        self._record = ProcessingRecord()
 
     def _setup_logger(self) -> logging.Logger:
         """Set up logger for processing operations."""
@@ -217,32 +233,11 @@ class XNSampleProcessor:
             console_handler.setFormatter(console_formatter)
             logger.addHandler(console_handler)
 
-        # File handler (optional)
-        if self.log_to_file:
-            # Create logs directory
-            logdir = os.path.join(self.output_dir, "logs")
-            os.makedirs(logdir, exist_ok=True)
-
-            # Get timestamp for log filename
-            now = datetime.now()
-            dt_string = now.strftime("%Y%m%d_%H%M%S")
-            log_file = os.path.join(logdir, f"XN_SAMPLE_processing_{dt_string}.log")
-
-            file_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-            file_handler = logging.FileHandler(log_file)
-            file_handler.setLevel(logging.DEBUG)
-            file_handler.setFormatter(file_formatter)
-            logger.addHandler(file_handler)
-
-            logger.info(f"Logging initialized. Detailed logs: {log_file}")
-        else:
-            logger.info("Logging initialized (console only)")
-
         return logger
 
     def process_files(
         self,
-        input_files: pd.DataFrame | str | list[str],
+        input_files: pd.DataFrame | str | list[str] | None = None,
         dataset_name: str = "dataset",
         save_output: bool = False,
         *,
@@ -252,13 +247,18 @@ class XNSampleProcessor:
         sct_archive_files: str | list[str] | None = None,
         sample_nos: list[str] | None = None,
         output_format: str = "csv",
+        bc_sysmex_dataset_dir: str | os.PathLike | list[str | os.PathLike] | None = None,
+        hospital_id: str | None = None,
     ) -> pd.DataFrame:
         """
-        Process XN_SAMPLE data from files or a pre-loaded DataFrame.
+        Process XN_SAMPLE data from files, a pre-loaded DataFrame, or Sysmex datasets.
+
+        Give exactly one of *input_files* (the HAAS route) and
+        *bc_sysmex_dataset_dir* (the direct route).
 
         Parameters
         ----------
-        input_files : pd.DataFrame or str or list of str
+        input_files : pd.DataFrame or str or list of str, optional
             Data to process. Accepts:
             - A ``pd.DataFrame`` (bypasses file loading entirely).
             - A path to a ``.csv``, ``.parquet``, or ``.pq`` file.
@@ -304,6 +304,17 @@ class XNSampleProcessor:
             Each entry is cast to ``str`` before comparison, so integer
             sample numbers (e.g. ``123456``) are handled transparently.
             Works with ``copy_output_data=True`` and ``copy_sct=True``.
+        bc_sysmex_dataset_dir : path or list of paths, optional
+            One or several Sysmex dataset directories, read through the
+            bloodcounts-sysmex-format read API (``pip install
+            'sysmexcbctools[dataset]'``).  Measurements are selected by
+            *hospital_id* and *sample_nos*, reshaped into what the HAAS route
+            loads from ``XN_SAMPLE.csv`` and cleaned by the same steps; the
+            output starts with each row's ``measurement_id``.  A measurement in
+            more than one of the datasets is refused.  Requires an
+            ``output_dir``: the processing record names every measurement read.
+        hospital_id : str, optional
+            Keep only this hospital's measurements.  Direct route only.
 
         Returns
         -------
@@ -313,10 +324,13 @@ class XNSampleProcessor:
         Raises
         ------
         ValueError
-            If *copy_output_data* or *copy_sct* (without
-            *sct_archive_files*) is True but *input_files* is a
-            DataFrame (source directories cannot be derived), or if
+            If not exactly one of *input_files* and *bc_sysmex_dataset_dir*
+            is given, if *copy_output_data* or *copy_sct* (without
+            *sct_archive_files*) is True but *input_files* are not file
+            paths (source directories cannot be derived), or if
             *save_output* is False (no output directory to write to).
+        FileNotFoundError
+            If a *bc_sysmex_dataset_dir* is not a dataset directory.
 
         Examples
         --------
@@ -328,6 +342,12 @@ class XNSampleProcessor:
         Process a parquet file:
 
         >>> df = processor.process_files("data/XN_SAMPLE.parquet")
+
+        Process one hospital of two Sysmex datasets:
+
+        >>> df = processor.process_files(
+        ...     bc_sysmex_dataset_dir=["site_a", "site_b"], hospital_id="A"
+        ... )
 
         Process a pre-loaded DataFrame:
 
@@ -358,88 +378,141 @@ class XNSampleProcessor:
         if isinstance(sct_archive_files, str):
             sct_archive_files = [sct_archive_files]
 
+        if (input_files is None) == (bc_sysmex_dataset_dir is None):
+            raise ValueError("Give exactly one of input_files and bc_sysmex_dataset_dir.")
+        if hospital_id is not None and bc_sysmex_dataset_dir is None:
+            raise ValueError("hospital_id needs bc_sysmex_dataset_dir.")
+        if bc_sysmex_dataset_dir is not None and self.output_dir is None:
+            raise ValueError(
+                "bc_sysmex_dataset_dir requires an output_dir, for the processing record."
+            )
+        if isinstance(bc_sysmex_dataset_dir, (str, os.PathLike)):
+            bc_sysmex_dataset_dir = [bc_sysmex_dataset_dir]
+        if bc_sysmex_dataset_dir is not None:
+            try:
+                from ._sysmex_dataset import read_xn_sample
+            except ImportError as e:
+                raise ImportError(
+                    "bc_sysmex_dataset_dir needs bloodcounts-sysmex-format. "
+                    "Install it with: pip install 'sysmexcbctools[dataset]'"
+                ) from e
+
         # Validate ancillary copy options
         needs_source_dirs = copy_output_data or (
             copy_sct and sct_archive_files is None
         )
-        if needs_source_dirs and isinstance(input_files, pd.DataFrame):
+        if needs_source_dirs and (
+            input_files is None or isinstance(input_files, pd.DataFrame)
+        ):
             raise ValueError(
                 "copy_output_data (and copy_sct without sct_archive_files) "
-                "require file paths as input_files, not a DataFrame."
+                "require file paths as input_files, not a DataFrame or a dataset."
             )
         if (copy_output_data or copy_sct) and not save_output:
             raise ValueError(
                 "copy_output_data and copy_sct require save_output=True."
             )
+        if save_output and self.output_dir is None:
+            raise ValueError("save_output requires an output_dir.")
 
-        self.logger.info(f"Processing dataset: {dataset_name}")
+        arguments = {
+            "dataset_name": dataset_name,
+            "save_output": save_output,
+            "copy_output_data": copy_output_data,
+            "copy_sct": copy_sct,
+            "output_data_columns": output_data_columns,
+            "sct_archive_files": sct_archive_files,
+            "sample_nos": sample_nos,
+            "output_format": output_format,
+            "bc_sysmex_dataset_dir": bc_sysmex_dataset_dir,
+            "hospital_id": hospital_id,
+        }
+        if isinstance(input_files, str):
+            input_files = [input_files]
+        with processing_record(
+            self.output_dir,
+            {name: getattr(self, name) for name in self._setting_names},
+            arguments,
+            input_files,
+            self.logger,
+            bc_sysmex_dataset_dir,
+        ) as self._record:
+            try:
+                self.logger.info(f"Processing dataset: {dataset_name}")
 
-        # Dispatch: DataFrame, single path, or list of paths
-        if isinstance(input_files, pd.DataFrame):
-            df = input_files
-            input_file_paths: list[str] | None = None
-        else:
-            if isinstance(input_files, str):
-                input_files = [input_files]
-            input_file_paths = list(input_files)
-            df = load_dataframes(input_file_paths, self.logger)
-        if self.enable_memory_monitoring:
-            log_memory_usage(self.logger, f"After loading {dataset_name} dataset")
+                # Dispatch: datasets, DataFrame, single path, or list of paths
+                input_file_paths: list[str] | None = None
+                if bc_sysmex_dataset_dir is not None:
+                    df = read_xn_sample(
+                        bc_sysmex_dataset_dir, hospital_id, sample_nos, self._record.read
+                    )
+                    sample_nos = None  # already applied
+                elif isinstance(input_files, pd.DataFrame):
+                    df = input_files
+                else:
+                    input_file_paths = list(input_files)
+                    df = load_dataframes(input_file_paths, self.logger)
+                if self.enable_memory_monitoring:
+                    log_memory_usage(self.logger, f"After loading {dataset_name} dataset")
 
-        # Filter to requested sample numbers before any processing
-        if sample_nos is not None:
-            stripped_nos = {str(s).strip() for s in sample_nos}
-            mask = df["Sample No."].str.strip().isin(stripped_nos)
-            n_before = len(df)
-            df = df.loc[mask].reset_index(drop=True)
-            self.logger.info(
-                f"Retained {df['Sample No.'].nunique()} unique sample numbers "
-                f"({len(df)} / {n_before} rows) after sample_nos filter"
-            )
+                # Filter to requested sample numbers before any processing
+                if sample_nos is not None:
+                    stripped_nos = {str(s).strip() for s in sample_nos}
+                    mask = df["Sample No."].str.strip().isin(stripped_nos)
+                    n_before = len(df)
+                    df = df.loc[mask].reset_index(drop=True)
+                    self._record.write("sample_nos_kept", f"{len(df)} of {n_before} rows")
+                    self.logger.info(
+                        f"Retained {df['Sample No.'].nunique()} unique sample numbers "
+                        f"({len(df)} / {n_before} rows) after sample_nos filter"
+                    )
 
-        # Run processing pipeline
-        df = self._process_pipeline(df, dataset_name)
+                # Run processing pipeline
+                df = self._process_pipeline(df, dataset_name)
 
-        # Save results if requested
-        if save_output:
-            fmt = output_format.lower()
-            ext_map = {"csv": "csv", "parquet": "parquet", "pq": "parquet"}
-            if fmt not in ext_map:
-                raise ValueError(
-                    f"Unsupported output_format '{output_format}'. "
-                    "Use 'csv' or 'parquet'."
-                )
-            ext = ext_map[fmt]
-            now = datetime.now()
-            dt_string = now.strftime("%Y%m%d_%H%M%S")
-            filename = f"{self.output_prefix}_{dataset_name}_{dt_string}.{ext}"
-            output_path = os.path.join(self.output_dir, filename)
-            save_results(df, output_path, self.logger)
+                # Save results if requested
+                if save_output:
+                    fmt = output_format.lower()
+                    ext_map = {"csv": "csv", "parquet": "parquet", "pq": "parquet"}
+                    if fmt not in ext_map:
+                        raise ValueError(
+                            f"Unsupported output_format '{output_format}'. "
+                            "Use 'csv' or 'parquet'."
+                        )
+                    ext = ext_map[fmt]
+                    now = datetime.now()
+                    dt_string = now.strftime("%Y%m%d_%H%M%S")
+                    filename = f"{self.output_prefix}_{dataset_name}_{dt_string}.{ext}"
+                    output_path = os.path.join(self.output_dir, filename)
+                    save_results(df, output_path, self.logger)
+                    self._record.write("output_file", os.path.abspath(output_path))
 
-        # Copy ancillary files if requested
-        if copy_output_data:
-            od_filename = f"OutputData_{dataset_name}_{dt_string}.{ext}"
-            od_path = os.path.join(self.output_dir, od_filename)
-            self.copy_output_data(
-                df,
-                input_files=input_file_paths,
-                output_path=od_path,
-                columns=output_data_columns,
-            )
+                # Copy ancillary files if requested
+                if copy_output_data:
+                    od_filename = f"OutputData_{dataset_name}_{dt_string}.{ext}"
+                    od_path = os.path.join(self.output_dir, od_filename)
+                    self.copy_output_data(
+                        df,
+                        input_files=input_file_paths,
+                        output_path=od_path,
+                        columns=output_data_columns,
+                    )
 
-        if copy_sct:
-            sct_dir = os.path.join(self.output_dir, "SCT")
-            self.copy_sct(
-                df,
-                input_files=input_file_paths,
-                sct_archive_files=sct_archive_files,
-                output_dir=sct_dir,
-            )
+                if copy_sct:
+                    sct_dir = os.path.join(self.output_dir, "SCT")
+                    self.copy_sct(
+                        df,
+                        input_files=input_file_paths,
+                        sct_archive_files=sct_archive_files,
+                        output_dir=sct_dir,
+                    )
 
-        # Store for later access
-        self.last_processed_ = df
+                # Store for later access
+                self.last_processed_ = df
 
-        return df
+                return df
+            finally:
+                self._record = ProcessingRecord()
 
     def copy_output_data(
         self,
@@ -705,13 +778,24 @@ class XNSampleProcessor:
         Run the complete processing pipeline on a dataframe.
 
         This is an internal method that applies all processing steps
-        in sequence.
+        in sequence.  Each step that drops rows, removes columns or changes
+        values runs through :meth:`_step`, which writes what it did to the
+        processing record.
         """
+        # A unique index is how _step tells which rows a step dropped.
+        if not df.index.is_unique:
+            df = df.reset_index(drop=True)
+
         # Remove duplicate rows
-        df = remove_duplicate_rows(df, self.logger)
+        df = self._step(
+            remove_duplicate_rows, df, self.logger, rows="exact duplicate of another row"
+        )
 
         # Remove technical samples
-        df = remove_technical_samples(df, self.logger, self.keep_drop_rows)
+        df = self._step(
+            remove_technical_samples, df, self.logger, self.keep_drop_rows,
+            rows=lambda dropped, out: dropped["Sample No."].map(_technical_reason),
+        )
 
         df = df.reset_index(drop=True)
 
@@ -720,37 +804,60 @@ class XNSampleProcessor:
         df = normalize_duplicate_columns(df, self.logger)
 
         # Remove unused columns
-        df = remove_unused_columns(df, self.logger)
+        df = self._step(
+            remove_unused_columns, df, self.logger, columns="not needed or not interpretable"
+        )
 
         # Encode flags
-        df = encode_flags(df, self.logger)
+        df = self._step(
+            encode_flags, df, self.logger,
+            columns="repeated CSV header", cells=("filled_0", "set_nan"),
+        )
 
         # Blank the channels the Discrete order never asked for.  Must run
         # after encode_flags (whose 0-fill would otherwise re-fabricate the
         # flags) and before everything below, which would otherwise compute on
         # the analyser's zero fill.
-        df = mask_unmeasured_channels(df, self.logger)
+        df = self._step(mask_unmeasured_channels, df, self.logger, cells=("set_nan",))
 
         # Encode data marks
-        df = process_marks(df, self.logger, self.make_dummy_marks)
+        df = self._step(
+            process_marks, df, self.logger, self.make_dummy_marks,
+            columns="replaced by one-hot mark columns",
+        )
 
         # Remove duplicate columns
-        df = remove_duplicate_columns(df, self.logger)
+        df = self._step(
+            remove_duplicate_columns, df, self.logger, columns="duplicate column label"
+        )
 
         # Remove clotted samples if requested
         if self.remove_clotintube:
-            df = remove_clot_in_tube_samples(df, self.logger, self.keep_drop_rows)
+            df = self._step(
+                remove_clot_in_tube_samples, df, self.logger, self.keep_drop_rows,
+                rows=lambda dropped, out: dropped[CLOT_INDICATORS].eq(1).apply(
+                    lambda flags: "clot in tube: " + ", ".join(flags.index[flags]), axis=1
+                ),
+            )
 
         # Handle multiple measurements if requested
         if self.remove_multimeasurementsamples:
-            if self.use_memory_optimized:
-                df, odd_samples_df, one_different_df = handle_multiple_measurements_optimized(
-                    df, self.logger, self.std_threshold, self.keep_drop_rows
-                )
-            else:
-                df, odd_samples_df, one_different_df = handle_multiple_measurements(
-                    df, self.logger, self.std_threshold, self.keep_drop_rows
-                )
+            df = self._step(coerce_fbc_to_numeric, df, self.logger, cells=("set_nan",))
+            handle = (
+                handle_multiple_measurements_optimized
+                if self.use_memory_optimized
+                else handle_multiple_measurements
+            )
+            df, odd_samples_df, one_different_df = self._step(
+                handle, df, self.logger, self.std_threshold, self.keep_drop_rows,
+                step="handle_multiple_measurements",
+                rows=lambda dropped, out: np.where(
+                    dropped["Sample No."].isin(out["Sample No."]),
+                    "repeat measurement agreeing with the one kept",
+                    "repeat measurements disagree; none kept",
+                ),
+            )
+            df.index = pd.RangeIndex(len(df))
 
             # Save diagnostic files (only if log_to_file is enabled)
             if self.log_to_file:
@@ -777,14 +884,16 @@ class XNSampleProcessor:
                     self.logger.info(f"Found {len(one_different_df)} samples with one different measurement (not saved)")
 
         # Clean non-numeric values
-        df = clean_non_numeric_values(df, self.logger)
+        df = self._step(clean_non_numeric_values, df, self.logger, cells=("set_nan",))
 
         # Remove redundant columns
-        df = remove_redundant_columns(df, self.logger)
+        df = self._step(
+            remove_redundant_columns, df, self.logger, columns="redundant HGB column"
+        )
 
         # Drop columns left empty for every row
         if self.drop_empty_columns:
-            df = remove_empty_columns(df, self.logger)
+            df = self._step(remove_empty_columns, df, self.logger, columns="empty for every row")
 
         # Convert to numeric
         df = convert_to_numeric(df, self.logger)
@@ -796,7 +905,11 @@ class XNSampleProcessor:
 
         # Remove correlated columns if requested
         if self.remove_correlated:
-            df = remove_correlated_columns(df, correlated_columns, self.logger)
+            features = correlated_columns.groupby("Correlated features")["Standard FBC feature"]
+            df = self._step(
+                remove_correlated_columns, df, correlated_columns, self.logger,
+                columns=lambda c: "correlated (>= 0.8) with " + ", ".join(features.get_group(c)),
+            )
 
         # Final reporting
         if self.keep_drop_rows:
@@ -809,6 +922,56 @@ class XNSampleProcessor:
             self.logger.info(f"Final number of unique samples: {df['Sample No.'].nunique()}")
 
         return df
+
+    def _step(self, fn, df, *args, step=None, rows=None, columns=None, cells=()):
+        """Run one cleaning step, writing what it changed to the processing record.
+
+        Parameters
+        ----------
+        fn : callable
+            The step, called as ``fn(df, *args)``.  May return a tuple whose
+            first item is the frame.
+        step : str, optional
+            Name in the record.  Default ``fn.__name__``.
+        rows : str or callable, optional
+            Reason for each row the step drops: a string, or
+            ``rows(dropped, out)`` giving one per dropped row.
+        columns : str or callable, optional
+            Reason for each column the step removes: a string, or
+            ``columns(column)``.
+        cells : tuple of {"filled_0", "set_nan"}
+            Per-column counts to record: cells that went from null to a value
+            (the step's fill) and from a value to null.  Only for steps that
+            drop no rows: the counts are differences of non-null totals.
+        """
+        if not self._record:
+            return fn(df, *args)
+
+        step = step or fn.__name__
+        counts = df.count() if cells else None
+        before_columns = list(df.columns)
+        result = fn(df, *args)
+        out = result[0] if isinstance(result, tuple) else result
+
+        if rows is not None:
+            dropped = df.loc[df.index.difference(out.index)]
+            if len(dropped):
+                reasons = rows(dropped, out) if callable(rows) else rows
+                self._record.dropped(step, dropped, reasons)
+        if columns is not None:
+            kept = set(out.columns)
+            for c in before_columns:
+                if c not in kept:
+                    reason = columns(c) if callable(columns) else columns
+                    self._record.removed_column(c, step, reason)
+        if cells:
+            common = counts.index.intersection(out.columns)
+            change = out[common].count() - counts[common]
+            if "filled_0" in cells:
+                self._record.cells(step, "filled_0", change.clip(lower=0))
+            if "set_nan" in cells:
+                self._record.cells(step, "set_nan", (-change).clip(lower=0))
+        return result
 
     def get_last_processed(self) -> pd.DataFrame | None:
         """
@@ -831,3 +994,8 @@ class XNSampleProcessor:
             Dictionary mapping diagnostic file types to their paths.
         """
         return self.diagnostic_files_.copy()
+
+
+def _technical_reason(sample_no: str) -> str:
+    prefix = next(p for p in SYSMEX_TECHNICAL_SAMPLE_PREFIXES if sample_no.startswith(p))
+    return f"technical sample number (starts with {prefix!r})"

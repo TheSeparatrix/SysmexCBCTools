@@ -9,14 +9,21 @@ carve-outs, and the two pipeline invariants that depend on where it runs.
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+
 import numpy as np
 import pandas as pd
 import pytest
 
+from sysmexcbctools.data.sysmexclean._channel_table import COLUMN_CHANNELS
 from sysmexcbctools.data.sysmexclean.discrete_channels import (
+    channels_for_column,
     mask_unmeasured,
     parse_discrete,
     unmeasured_by_discrete,
+    unmeasured_columns,
 )
 from sysmexcbctools.data.sysmexclean.processors import (
     encode_flags,
@@ -43,7 +50,7 @@ _COLUMNS = {
     "PLT-F(10^3/uL)": "0",  # PLT-F
     "IPF(%)": "0.0",  # PLT-F
     "WBC-P(10^3/uL)": "0.00",  # WPC
-    "TNC(10^3/uL)": "0.00",  # unattributed in the dictionary
+    "(Reserved)": "0",  # unattributed in the dictionary
     "WBC(10^3/uL).1": "6.5",  # duplicated header as pandas mangles it
     "RET%(%)_1": "0.00",  # ...and as normalize_duplicate_columns spells it
 }
@@ -108,7 +115,8 @@ class TestMaskUnmeasured:
         assert (duplicate in masked) == (base in masked)
 
     def test_unattributed_column_is_never_masked(self):
-        assert "TNC(10^3/uL)" not in _masked(_frame())
+        for discrete in ("CBC", "CBC+DIFF", _FULL):
+            assert "(Reserved)" not in _masked(_frame(Discrete=discrete))
 
     def test_compact_and_expanded_discrete_agree(self):
         assert _masked(_frame(Discrete="CDRP")) == _masked(
@@ -136,6 +144,87 @@ class TestMaskUnmeasured:
         out, _ = mask_unmeasured(_frame())
         plan = unmeasured_by_discrete(out)
         assert _RET_AND_LATER <= set(plan["CBC+DIFF"])
+
+
+class TestTheFormatsRule:
+    """The rule is bloodcounts-sysmex-format's, kept as a copy so the HAAS route
+    does not depend on the format.  These cases are the format's own."""
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("CBC+DIFF+RET+PLT-F", ["CBC", "DIFF", "RET", "PLTF"]),
+            ("CDRP", ["CBC", "DIFF", "RET", "PLTF"]),
+            ("CBC", ["CBC"]),
+            ("WPC", ["WPC"]),
+            ("cbc+diff", ["CBC", "DIFF"]),
+            ("CBC + DIFF", ["CBC", "DIFF"]),
+            # Not compact letters: "fRee sElECt" must not read as RET + CBC.
+            ("FREE SELECT", []),
+            # One unknown token makes the whole order unknown, so nothing is masked.
+            ("CBC+FOO", []),
+            ("", []),
+            (None, []),
+        ],
+    )
+    def test_parse_discrete(self, value, expected):
+        assert parse_discrete(value) == expected
+
+    def test_unrecognised_discrete_is_left_alone(self):
+        assert _masked(_frame(Discrete="???")) == set()
+        assert _masked(_frame(Discrete="CBC+FOO")) == set()
+
+    @pytest.mark.parametrize(
+        ("discrete", "column", "masked"),
+        [
+            # A ratio needs both channels: WNR alone (via CBC) is not enough.
+            ("CBC+DIFF+RET+PLT-F", "DLT-WBCP()", True),
+            ("CBC+DIFF", "DLT-RBC()", True),
+            # An absolute count is a WDF % times a WNR count.
+            ("CBC", "NEUT#(10^3/uL)", True),
+            ("CBC", "NEUT#/M", True),
+            ("CBC+DIFF", "NEUT#(10^3/uL)", False),
+            # Reported RBC is RBC-I: either listed channel suffices.
+            ("CBC+DIFF", "RBC(10^6/uL)", False),
+        ],
+    )
+    def test_multi_channel_values_need_every_channel(self, discrete, column, masked):
+        df = _frame(Discrete=discrete, **{column: "0.0"})
+        assert (column in _masked(df)) is masked
+
+    def test_overrides_attribute_tnc_to_wnr(self):
+        df = _frame(**{"TNC(10^3/uL)": "0.00", "TNC/M": ""})
+        assert "TNC(10^3/uL)" not in _masked(df)
+        masked = _masked(df.assign(Discrete="RET"))
+        assert {"TNC(10^3/uL)", "WBC(10^3/uL)"} <= masked
+
+    def test_mark_resolves_to_its_exact_value_column_whatever_the_hash_seed(self):
+        """``NEUT#/M`` belongs to ``NEUT#(10^3/uL)``, not ``NEUT#(hsA)(10^3/uL)``."""
+        expected = {"CBC-WNR", "DIFF/WDF"}
+        assert channels_for_column("NEUT#/M") == expected
+        code = (
+            "from sysmexcbctools.data.sysmexclean.discrete_channels import "
+            "channels_for_column as c; print(sorted(c('NEUT#/M')))"
+        )
+        out = subprocess.run(
+            [sys.executable, "-c", code],
+            env={**os.environ, "PYTHONHASHSEED": "3"},
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        assert out.strip() == str(sorted(expected))
+
+    def test_matches_the_format_column_for_column(self):
+        """Every attributed column (and its mark) under every channel order."""
+        fmt = pytest.importorskip("bc_sysmex_format.discrete_channels")
+        columns = [*COLUMN_CHANNELS, *fmt.COLUMN_CHANNELS, "TNC/M", "NEUT#/M"]
+        tokens = ["CBC", "DIFF", "RET", "PLT-F", "WPC"]
+        for n in range(1 << len(tokens)):
+            discrete = "+".join(t for i, t in enumerate(tokens) if n >> i & 1)
+            ours = unmeasured_columns(parse_discrete(discrete), columns)
+            theirs = fmt.unmeasured_columns(fmt.parse_discrete(discrete), columns)
+            assert ours == theirs, discrete
 
 
 class TestPipelinePlacement:
