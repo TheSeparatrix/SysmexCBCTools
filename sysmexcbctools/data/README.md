@@ -249,7 +249,7 @@ Main class for processing Sysmex XN_SAMPLE data.
 - `keep_drop_rows` (bool, default=False): Mark rows for removal without dropping
 - `make_dummy_marks` (bool, default=False): Create dummy variables for marks
 - `drop_empty_columns` (bool, default=True): Remove columns that are NaN for every row
-- `use_memory_optimized` (bool, default=True): Use memory-efficient processing
+- `use_memory_optimized` (bool, default=True): Deprecated, has no effect; setting it to `False` emits a `DeprecationWarning`
 - `enable_memory_monitoring` (bool, default=True): Log memory usage
 - `output_dir` (str or None, default="./output"): Output directory; holds the processing record. `None` writes nothing
 - `output_prefix` (str, default="XN_SAMPLE_processed"): Output filename prefix
@@ -424,7 +424,6 @@ sysmexcbctools/data/
     ├── processors.py            # Data transformation functions
     ├── utils.py                 # I/O and logging utilities
     ├── constants.py             # FBC parameters and column lists
-    ├── memory_optimized.py      # Memory-efficient processing
     ├── ancillary.py             # OutputData.csv / SCT matching and copying
     ├── discrete_channels.py     # Which channel populates which column (rules)
     └── _channel_table.py        # ...and the generated data behind it
