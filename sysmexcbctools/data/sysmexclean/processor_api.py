@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import warnings
 from datetime import datetime
 
 import numpy as np
@@ -17,7 +18,6 @@ import pandas as pd
 
 from ._processing_record import ProcessingRecord, processing_record
 from .constants import SYSMEX_TECHNICAL_SAMPLE_PREFIXES
-from .memory_optimized import handle_multiple_measurements_optimized
 from .processors import (
     CLOT_INDICATORS,
     analyze_correlations,
@@ -84,7 +84,8 @@ class XNSampleProcessor:
         depends on the channel mix of the cohort, so set this False when the
         column sets of separate runs have to line up.
     use_memory_optimized : bool, default=True
-        Use memory-optimized processing for large datasets (>100k rows).
+        Deprecated; has no effect.  The multiple-measurement step always
+        processes sample IDs in chunks.  Setting it to False warns.
     enable_memory_monitoring : bool, default=True
         Log memory usage throughout processing.
     output_dir : str or None, default="./output"
@@ -191,6 +192,13 @@ class XNSampleProcessor:
 
         for name, default in processing_params.items():
             setattr(self, name, proc.get(name, default))
+        if not self.use_memory_optimized:
+            warnings.warn(
+                "use_memory_optimized is deprecated and has no effect; "
+                "the chunked multiple-measurement step is always used.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
 
         self.log_to_file = log_to_file
         self.verbose = verbose
@@ -843,14 +851,9 @@ class XNSampleProcessor:
         # Handle multiple measurements if requested
         if self.remove_multimeasurementsamples:
             df = self._step(coerce_fbc_to_numeric, df, self.logger, cells=("set_nan",))
-            handle = (
-                handle_multiple_measurements_optimized
-                if self.use_memory_optimized
-                else handle_multiple_measurements
-            )
             df, odd_samples_df, one_different_df = self._step(
-                handle, df, self.logger, self.std_threshold, self.keep_drop_rows,
-                step="handle_multiple_measurements",
+                handle_multiple_measurements, df, self.logger,
+                self.std_threshold, self.keep_drop_rows,
                 rows=lambda dropped, out: np.where(
                     dropped["Sample No."].isin(out["Sample No."]),
                     "repeat measurement agreeing with the one kept",

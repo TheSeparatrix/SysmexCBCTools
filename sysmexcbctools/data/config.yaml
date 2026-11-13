@@ -25,5 +25,5 @@ processing:
   drop_empty_columns: true # Remove columns that are NaN for every row. Which columns those are depends on the cohort's channel mix, so set false when separate runs have to share a column set.
   
   # Memory optimization settings
-  use_memory_optimized: true # Use memory-optimized processing for large datasets (recommended for >100k rows)
+  use_memory_optimized: true # Deprecated, has no effect (false emits a DeprecationWarning)
   enable_memory_monitoring: true # Log memory usage throughout processing

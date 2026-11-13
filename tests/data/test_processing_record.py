@@ -190,19 +190,45 @@ def test_a_run_records_how_each_measurement_was_processed(
     assert header["outcome"] == "success"
 
 
-def test_keep_drop_rows_records_only_real_rows(xn_sample, tmp_path):
-    """The unoptimised multiple-measurement step once flagged column labels as
-    rows, adding one phantom row per column to the frame and the record."""
+def test_keep_drop_rows_records_the_multiple_measurement_rows(xn_sample, tmp_path):
+    """Under keep_drop_rows the multiple-measurement step still drops rows, and
+    records exactly those: no phantom rows, no extra row per group."""
     output_dir = tmp_path / "out"
     processor = XNSampleProcessor(
-        output_dir=str(output_dir), keep_drop_rows=True, use_memory_optimized=False,
-        verbose=0,
+        output_dir=str(output_dir), keep_drop_rows=True, verbose=0
     )
     processor.process_files(str(xn_sample))
 
     [record] = _records(output_dir)
     dropped = pd.read_csv(_parse(record)[0]["dropped_rows"], dtype=str)
-    assert set(dropped["Sample No."]) <= {"A001", "D004"}
+    step = dropped[dropped["step"] == "handle_multiple_measurements"]
+    assert step.drop(columns="step").to_dict("records") == [
+        {"Sample No.": "A001", "Date": "2024/01/03", "Time": "10:00:00",
+         "reason": "repeat measurement agreeing with the one kept"},
+        {"Sample No.": "D004", "Date": "2024/01/02", "Time": "13:00:00",
+         "reason": "repeat measurements disagree; none kept"},
+        {"Sample No.": "D004", "Date": "2024/01/03", "Time": "13:00:00",
+         "reason": "repeat measurements disagree; none kept"},
+    ]
+
+
+@pytest.mark.parametrize("via_config", [False, True])
+def test_use_memory_optimized_is_deprecated_and_changes_nothing(
+    xn_sample, tmp_path, via_config
+):
+    if via_config:
+        config = tmp_path / "config.yaml"
+        config.write_text("processing:\n  use_memory_optimized: false\n")
+        kwargs = {"config_path": str(config)}
+    else:
+        kwargs = {"use_memory_optimized": False}
+
+    with pytest.warns(DeprecationWarning, match="use_memory_optimized"):
+        processor = XNSampleProcessor(output_dir=None, verbose=0, **kwargs)
+    df = processor.process_files(str(xn_sample))
+
+    expected = XNSampleProcessor(output_dir=None, verbose=0).process_files(str(xn_sample))
+    pd.testing.assert_frame_equal(df, expected)
 
 
 def test_a_failed_run_records_its_failure(tmp_path):

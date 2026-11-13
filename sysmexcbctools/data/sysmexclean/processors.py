@@ -325,133 +325,164 @@ def coerce_fbc_to_numeric(df, logger):
 
 
 def handle_multiple_measurements(df, logger, std_threshold=1.0, keep_drop_rows=False):
-    """
-    Handle samples with multiple measurements by comparing on FBC features.
-    If they're similar enough, keep the first measurement.
+    """Keep one row per sample measured more than once, if its repeats agree.
+
+    The first two measurements (by date and time) are compared on each
+    standard FBC parameter; if at most one differs by more than
+    ``std_threshold`` cohort standard deviations, the earliest is kept,
+    otherwise none is.  Sample IDs are processed in chunks to bound peak
+    memory.  Expects the FBC columns already numeric (``coerce_fbc_to_numeric``).
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Frame with ``Sample No.``, ``Date``, ``Time`` and FBC columns.
+    logger : logging.Logger
+        Logger for progress messages.
+    std_threshold : float, default=1.0
+        Agreement threshold in cohort standard deviations.
+    keep_drop_rows : bool, default=False
+        Also flag repeats in ``drop_dup`` / ``drop_dup_disagree`` on the
+        input *df*.  The returned frame omits them either way.
+
+    Returns
+    -------
+    df_result : pd.DataFrame
+        The kept rows, with their original index.
+    many_samples_df : pd.DataFrame
+        Groups whose repeats disagree, for manual review.
+    only_one_different_df : pd.DataFrame
+        Kept groups that differed on exactly one parameter.
     """
     logger.info("Handling samples with multiple measurements")
-
-    # Check for multiple entries of the same sample number
-    id_counts = df["Sample No."].value_counts()
-    multiple_entries = id_counts[id_counts > 1]
-
-    logger.info(
-        f"Found {len(multiple_entries)}/{len(df['Sample No.'].unique())} samples "
-        f"({len(multiple_entries)/len(df['Sample No.'].unique()):.1%}) with multiple entries"
-    )
-
+    log_memory_usage(logger, "Before multiple measurements processing")
     initial_len = df.shape[0]
-
-    # Convert FBC measurements to numeric
-    for fbc_measurement in STANDARD_FBC_DECRYPT:
-        df[fbc_measurement] = pd.to_numeric(df[fbc_measurement], errors="coerce")
-
-    # Calculate standard deviations for each FBC measurement
     stds = {
         fbc_measurement: df[fbc_measurement].std()
         for fbc_measurement in STANDARD_FBC_DECRYPT
+        if fbc_measurement in df.columns
     }
 
     if keep_drop_rows:
         drop_cols = get_drop_cols(df)
 
-    # Process each group of samples with the same sample number
-    grouped = df.groupby("Sample No.")
+    # Get samples with multiple entries
+    id_counts = df["Sample No."].value_counts()
+    multiple_entries = id_counts[id_counts > 1].index.tolist()
+    n_samples = df["Sample No."].nunique(dropna=False)
+    logger.info(
+        f"Found {len(multiple_entries)}/{n_samples} samples "
+        f"({len(multiple_entries)/n_samples:.1%}) with multiple entries"
+    )
+
+    # Process in chunks to avoid memory issues
+    chunk_size = 1000  # Process 1000 sample IDs at a time
+    chunks = [multiple_entries[i:i + chunk_size] for i in range(0, len(multiple_entries), chunk_size)]
+
     multi_sample_rows = []
     odd_samples = []
     only_one_different = []
 
-    logger.info("Checking for multiple measurements of the same sample number")
-    for sample_id, group in tqdm(grouped):
-        # Skip groups with only one row
-        if len(group) < 2:
-            multi_sample_rows.append(group)
-            continue
+    # First, keep all samples with no duplicates
+    single_samples = df[~df["Sample No."].isin(multiple_entries)]
+    multi_sample_rows.append(single_samples)
 
-        # Sort by date and time
-        group = group.sort_values(["Sample No.", "Date", "Time"], ascending=True)
+    logger.info(f"Processing {len(multiple_entries)} samples with multiple entries in {len(chunks)} chunks")
 
-        # Check difference for each standard FBC measurement
-        check_list = []
-        for fbc_measurement in STANDARD_FBC_DECRYPT:
-            difference = abs(
-                group.iloc[0][fbc_measurement] - group.iloc[1][fbc_measurement]
-            )
-            check = ~(
-                difference > std_threshold * stds[fbc_measurement]
-            )  # written this way to keep NaNs
+    for i, chunk_sample_ids in enumerate(tqdm(chunks, desc="Processing chunks")):
+        # Process this chunk
+        chunk_df = df[df["Sample No."].isin(chunk_sample_ids)]
+        grouped = chunk_df.groupby("Sample No.")
 
-            if not check:
-                logger.warning(
-                    f"Sample {sample_id} failed check on {fbc_measurement} with value 1 "
-                    f"{group.iloc[0][fbc_measurement]:.2f} and value 2 {group.iloc[1][fbc_measurement]:.2f} "
-                    f"(threshold difference: {std_threshold * stds[fbc_measurement]:.2f})"
+        for sample_id, group in grouped:
+            if len(group) < 2:
+                multi_sample_rows.append(group)
+                continue
+
+            # Sort by date and time
+            group = group.sort_values(["Sample No.", "Date", "Time"], ascending=True)
+
+            # Check difference for each standard FBC measurement
+            check_list = []
+            for fbc_measurement in STANDARD_FBC_DECRYPT:
+                if fbc_measurement not in group.columns:
+                    continue
+
+                difference = abs(
+                    group.iloc[0][fbc_measurement] - group.iloc[1][fbc_measurement]
                 )
+                check = ~(difference > std_threshold * stds[fbc_measurement])
 
-            check_list.append(check)
+                if not check and logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        f"Sample {sample_id} failed check on {fbc_measurement} with value 1 "
+                        f"{group.iloc[0][fbc_measurement]:.2f} and value 2 {group.iloc[1][fbc_measurement]:.2f} "
+                        f"(threshold difference: {std_threshold * stds[fbc_measurement]:.2f})"
+                    )
 
-        # Keep measurement if all checks were true or at most one failed
-        if sum(check_list) >= len(check_list) - 1:
-            multi_sample_rows.append(group.iloc[:1])  # Keep only the first measurement
+                check_list.append(check)
 
-            if keep_drop_rows:
-                # if the first of the duplicates is already scheduled to be dropped
-                # loop over all indices after the first
-                already_dropping = group[drop_cols].any(axis=1)
-                first_false_i = next(
-                    (i for i, val in enumerate(already_dropping) if val is False), None
-                )
+            # Keep measurement if all checks were true or at most one failed
+            if sum(check_list) >= len(check_list) - 1:
+                multi_sample_rows.append(group.iloc[:1])  # Keep only the first measurement
 
-                for i, idx in enumerate(group.index):
-                    if i != first_false_i:
-                        df.loc[idx, "drop_dup"] = True
+                if keep_drop_rows:
+                    # Mark duplicates for dropping
+                    already_dropping = group[drop_cols].any(axis=1)
+                    first_false_i = next(
+                        (i for i, val in enumerate(already_dropping) if val is False), None
+                    )
 
-                if first_false_i is None:
-                    first_false_i = 0
-
-                multi_sample_rows.append(
-                    group.iloc[first_false_i : (first_false_i + 1)]
-                )
+                    for j, idx in enumerate(group.index):
+                        if j != first_false_i:
+                            df.loc[idx, "drop_dup"] = True
+                else:
+                    if sum(check_list) == len(check_list) - 1:  # only one check failed
+                        only_one_different.append(group)
             else:
-                if sum(check_list) == len(check_list) - 1:  # only one check failed
-                    only_one_different.append(group)
-        else:
-            if keep_drop_rows:
-                for idx in group.index:
-                    df.loc[idx, "drop_dup_disagree"] = True
-            odd_samples.append(group)
+                if keep_drop_rows:
+                    for idx in group.index:
+                        df.loc[idx, "drop_dup_disagree"] = True
+                odd_samples.append(group)
+
+        # Log progress and memory
+        if i % 10 == 0:
+            log_memory_usage(logger, f"After processing chunk {i+1}/{len(chunks)}")
 
     # Concatenate all rows
-    df = pd.concat(multi_sample_rows)
+    # Original index kept, so the caller can tell which rows were dropped.
+    df_result = pd.concat(multi_sample_rows) if multi_sample_rows else pd.DataFrame()
 
-    # Save samples that failed checks for manual review
+    # Process diagnostic dataframes
     try:
-        many_samples_df = pd.concat(odd_samples)
-        from sklearn.preprocessing import LabelEncoder
-
-        many_samples_df["Sample No."] = LabelEncoder().fit_transform(
-            many_samples_df["Sample No."].values
-        )
-    except ValueError:
+        many_samples_df = pd.concat(odd_samples, ignore_index=True) if odd_samples else pd.DataFrame()
+        if not many_samples_df.empty:
+            from sklearn.preprocessing import LabelEncoder
+            many_samples_df["Sample No."] = LabelEncoder().fit_transform(
+                many_samples_df["Sample No."].values
+            )
+    except (ValueError, ImportError):
         many_samples_df = pd.DataFrame()
 
     try:
-        only_one_different_df = pd.concat(only_one_different)
-        from sklearn.preprocessing import LabelEncoder
-
-        only_one_different_df["Sample No."] = LabelEncoder().fit_transform(
-            only_one_different_df["Sample No."].values
-        )
-    except ValueError:
+        only_one_different_df = pd.concat(only_one_different, ignore_index=True) if only_one_different else pd.DataFrame()
+        if not only_one_different_df.empty:
+            from sklearn.preprocessing import LabelEncoder
+            only_one_different_df["Sample No."] = LabelEncoder().fit_transform(
+                only_one_different_df["Sample No."].values
+            )
+    except (ValueError, ImportError):
         only_one_different_df = pd.DataFrame()
 
-    rows_dropped = count_rows_dropped(df, initial_len, "drop_dup", keep_drop_rows)
+    log_memory_usage(logger, "After chunked multiple measurements processing")
+
+    rows_dropped = initial_len - len(df_result)
     logger.info(
         f"Dropped {rows_dropped} identical sample number rows ({rows_dropped/initial_len:.2%}), "
         f"keeping the one with the earliest date and time if samples matched within {std_threshold} stds"
     )
 
-    return df, many_samples_df, only_one_different_df
+    return df_result, many_samples_df, only_one_different_df
 
 
 def _is_text_dtype(dtype):
