@@ -208,3 +208,31 @@ def test_the_processing_record_names_datasets_reader_and_measurements(
         )
     ]
     assert sorted(df["Sample No."]) == ["S-0001", "S-0002"]
+
+
+def test_a_raised_ip_flag_is_encoded_as_one(tmp_path):
+    """The dataset stores IP flags as text; a raised one reads back as ``'1.0'``."""
+    from bc_sysmex_format import reader
+    from bc_sysmex_format.db import SysmexDataset
+
+    csv = haas_export(tmp_path / "haas", ["S-0001", "S-0002"])
+    flag = "IP ABN(WBC)WBC Abn Scattergram"
+    lines = csv.read_text(encoding="latin-1").split("\n")
+    column = lines[0].split(",").index(flag)
+    fields = lines[1].split(",")
+    assert fields[column] == ""
+    fields[column] = "1"
+    lines[1] = ",".join(fields)
+    csv.write_text("\n".join(lines), encoding="latin-1")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with SysmexDataset(tmp_path / "ds") as ds:
+            ds.ingest_xn_sample(csv, "A")
+    with reader.open_dataset(tmp_path / "ds") as con, con.cursor() as cur:
+        ids = [mid for (mid,) in reader.measurements(con).select("measurement_id").fetchall()]
+        stored = reader.xn_sample(cur, ids)
+    assert sorted(stored[flag].fillna("")) == ["", "1.0"]
+
+    df = clean(tmp_path, bc_sysmex_dataset_dir=str(tmp_path / "ds"))
+
+    assert list(df.sort_values("Sample No.")[flag]) == [1, 0]
