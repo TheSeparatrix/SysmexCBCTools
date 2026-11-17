@@ -181,7 +181,14 @@ def remove_unused_columns(df, logger):
 
 
 def encode_flags(df, logger):
-    """Encode various flags and indicators as binary values."""
+    """Encode various flags and indicators as binary values.
+
+    Raises
+    ------
+    ValueError
+        If an ``Abnormal``, ``Suspect`` or ``IP`` flag column holds a
+        non-numeric value; the message names the column.
+    """
     logger.info("Encoding flags and IP messages")
 
     # Encode Positive/Error flags: null or 0 -> 0, anything else -> 1.

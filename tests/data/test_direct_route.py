@@ -211,7 +211,7 @@ def test_the_processing_record_names_datasets_reader_and_measurements(
 
 
 def test_a_raised_ip_flag_is_encoded_as_one(tmp_path):
-    """The dataset stores IP flags as text; a raised one reads back as ``'1.0'``."""
+    """The Sysmex dataset stores IP flags as text; a raised one reads back as ``'1.0'``."""
     from bc_sysmex_format import reader
     from bc_sysmex_format.db import SysmexDataset
 
