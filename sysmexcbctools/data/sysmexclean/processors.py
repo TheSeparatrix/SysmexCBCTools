@@ -181,7 +181,14 @@ def remove_unused_columns(df, logger):
 
 
 def encode_flags(df, logger):
-    """Encode various flags and indicators as binary values."""
+    """Encode various flags and indicators as binary values.
+
+    Raises
+    ------
+    ValueError
+        If an ``Abnormal``, ``Suspect`` or ``IP`` flag column holds a
+        non-numeric value; the message names the column.
+    """
     logger.info("Encoding flags and IP messages")
 
     # Encode Positive/Error flags: null or 0 -> 0, anything else -> 1.
@@ -198,19 +205,17 @@ def encode_flags(df, logger):
             s[s != 0] = 1
             df[col] = s.astype(int)
 
-    # Encode Abnormal or Suspect flags: null -> 0, else original (numeric).
+    # Encode Abnormal/Suspect and IP flags: null -> 0, else the number.  The
+    # direct route stores IP flags as text, so a raised flag arrives as '1.0'
+    # and must be converted, not cast.  Anything not a number is an error:
+    # these are clinical flags, not to be coerced to missing.
     for col in df.columns:
-        if col.endswith("Abnormal") or col.endswith("Suspect"):
-            s = df[col].astype(object)
-            s[s.isna()] = 0
-            df[col] = s.astype(int)
-
-    # Encode IP flags: null -> 0, else original (numeric).
-    for col in df.columns:
-        if col.startswith("IP "):
-            s = df[col].astype(object)
-            s[s.isna()] = 0
-            df[col] = s.astype(int)
+        if col.endswith(("Abnormal", "Suspect")) or col.startswith("IP "):
+            try:
+                s = pd.to_numeric(df[col])
+            except (TypeError, ValueError) as e:
+                raise ValueError(f"Flag column {col!r} holds a non-numeric value: {e}") from e
+            df[col] = s.fillna(0).astype(int)
 
     # Process Q-Flag columns
     # Collect Q-Flag columns to avoid fragmentation from repeated column additions

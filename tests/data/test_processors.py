@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import io
 import logging
+import re
 
 import pandas as pd
+import pytest
 
-from sysmexcbctools.data.sysmexclean.processors import clean_non_numeric_values
+from sysmexcbctools.data.sysmexclean.processors import (
+    clean_non_numeric_values,
+    encode_flags,
+)
 
 
 def _quiet_logger() -> logging.Logger:
@@ -64,3 +69,29 @@ def test_numeric_columns_are_left_alone():
 
     assert out["a"].tolist() == [1.5, 2.5]
     assert out["b"].tolist() == [2, 3]
+
+
+@pytest.mark.parametrize("column", ["IP ABN(WBC)WBC Abn Scattergram", "WBC Abnormal"])
+@pytest.mark.parametrize(
+    "values",
+    [
+        ["1.0", "0.0", "1", None],  # text, as the direct route stores IP flags
+        [1.0, 0.0, 1.0, float("nan")],  # float, as pandas reads a CSV
+        pd.array([1, 0, 1, None], dtype="Int64"),
+    ],
+)
+def test_flags_are_encoded_as_integers(column, values):
+    df = pd.DataFrame({column: values})
+
+    out = encode_flags(df, _quiet_logger())
+
+    assert out[column].tolist() == [1, 0, 1, 0]
+    assert out[column].dtype == int
+
+
+@pytest.mark.parametrize("column", ["IP ABN(WBC)WBC Abn Scattergram", "WBC Suspect"])
+def test_a_non_numeric_flag_names_its_column(column):
+    df = pd.DataFrame({column: ["1.0", "yes"]})
+
+    with pytest.raises(ValueError, match=re.escape(column)):
+        encode_flags(df, _quiet_logger())
